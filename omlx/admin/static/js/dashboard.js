@@ -190,7 +190,7 @@
             hfRecommendedLoaded: false,
             hfRecommendedLoading: false,
             hfRecommendedTab: 'trending',
-            hfMlxOnly: true,
+            hfMlxOnly: false,
 
             // Pagination state
             hfPage: { trending: 1, popular: 1, search: 1 },
@@ -229,7 +229,7 @@
             msRecommendedLoaded: false,
             msRecommendedLoading: false,
             msRecommendedTab: 'trending',
-            msMlxOnly: true,
+            msMlxOnly: false,
 
             // MS Pagination state
             msPage: { trending: 1, popular: 1, search: 1 },

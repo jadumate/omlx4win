@@ -59,6 +59,7 @@ class SchedulerConfig:
     completion_batch_size: int = 32
     prefill_step_size: int = 2048
     paged_cache_block_size: int = 256
+    initial_cache_blocks: int = 256
     max_cache_blocks: Optional[int] = None
     paged_ssd_cache_dir: Optional[str] = None
     paged_ssd_cache_max_size: int = 100 * 1024 * 1024 * 1024
