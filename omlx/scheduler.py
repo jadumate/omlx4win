@@ -107,8 +107,18 @@ class _RequestState:
 
     def _compress_kv(self, past_key_values) -> None:
         """Compress past_key_values into self._tq_cache."""
+        import traceback
         from .turboquant_kv import TorchTurboQuantKVCache
-        self._tq_cache = TorchTurboQuantKVCache(past_key_values, bits=self._tq_bits)
+        logger.debug(
+            f"_compress_kv: type={type(past_key_values).__name__} "
+            f"has_key_cache={hasattr(past_key_values, 'key_cache')} "
+            f"has_value_cache={hasattr(past_key_values, 'value_cache')}"
+        )
+        try:
+            self._tq_cache = TorchTurboQuantKVCache(past_key_values, bits=self._tq_bits)
+        except Exception:
+            logger.error(f"_compress_kv failed:\n{traceback.format_exc()}")
+            raise
         self.past_key_values = None  # free fp16 tensors
 
     def _decompress_kv(self):
@@ -285,7 +295,8 @@ class Scheduler:
                 else:
                     token_id = state.decode_step()
             except Exception as e:
-                logger.error(f"Generation error for {rid}: {e}")
+                import traceback as _tb
+                logger.error(f"Generation error for {rid}: {e}\n{_tb.format_exc()}")
                 output = RequestOutput(
                     request_id=rid, finished=True, finish_reason="error",
                     error=str(e), prompt_tokens=request.num_prompt_tokens

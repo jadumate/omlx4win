@@ -240,12 +240,29 @@ class TorchTurboQuantKVCache:
         Newer transformers returns a DynamicCache / Cache object instead of a
         plain tuple-of-tuples.  Handle both formats transparently.
         """
+        import torch
         # transformers Cache objects (DynamicCache, HybridCache, etc.)
         if hasattr(past_key_values, 'key_cache') and hasattr(past_key_values, 'value_cache'):
             return zip(past_key_values.key_cache, past_key_values.value_cache)
-        return past_key_values
+        # Legacy tuple-of-tuples — each element should be (key, value[, ...])
+        # Yield only the first two tensors per layer to be safe
+        def _safe_pairs(pkv):
+            for item in pkv:
+                if isinstance(item, (tuple, list)):
+                    yield item[0], item[1]
+                elif isinstance(item, torch.Tensor):
+                    # Shouldn't happen, but guard anyway
+                    raise TypeError(
+                        f"past_key_values contains raw tensor at top level; "
+                        f"expected tuple-of-tuples or Cache object"
+                    )
+                else:
+                    raise TypeError(f"Unexpected item type in past_key_values: {type(item)}")
+        return _safe_pairs(past_key_values)
 
     def _compress(self, past_key_values) -> None:
+        pkv_type = type(past_key_values).__name__
+        logger.debug(f"TurboQuantKVCache._compress: pkv type={pkv_type}")
         for k, v in self._iter_kv(past_key_values):
             dim = k.shape[-1]
             codec = self._get_codec(dim, str(k.device))
