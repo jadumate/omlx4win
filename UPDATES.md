@@ -1,5 +1,17 @@
 # UPDATES
 
+## 2026-03-26 (2) — Bug fixes
+
+### Fixes
+
+| File | Fix |
+|------|-----|
+| `omlx/cache/paged_ssd_cache.py` | `os.sysconf` is POSIX-only; falls back to `psutil.virtual_memory().total` on Windows |
+| `omlx/scheduler.py` | Added missing `initial_cache_blocks` field to `SchedulerConfig` |
+| `omlx/admin/static/js/dashboard.js` | Default `hfMlxOnly` and `msMlxOnly` to `false` so model downloader shows all HuggingFace/ModelScope models instead of MLX-only |
+
+---
+
 ## 2026-03-26 — Windows Port (torch + transformers)
 
 Ported oMLX from Apple Silicon / MLX to Windows with PyTorch + HuggingFace Transformers.
