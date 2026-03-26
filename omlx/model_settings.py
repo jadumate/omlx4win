@@ -56,6 +56,10 @@ class ModelSettings:
     thinking_budget_enabled: bool = False
     thinking_budget_tokens: Optional[int] = None
 
+    # Weight quantization for loading (reduces VRAM usage)
+    # Supported: "4bit" (NF4 via bitsandbytes), "8bit" (INT8 via bitsandbytes), None (fp16/fp32)
+    quantization: Optional[str] = None
+
     # TurboQuant KV cache (experimental: vector quantization for KV cache compression)
     turboquant_kv_enabled: bool = False
     turboquant_kv_bits: int = 4  # 3 or 4

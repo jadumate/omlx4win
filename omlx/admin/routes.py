@@ -93,6 +93,8 @@ class ModelSettingsRequest(BaseModel):
     index_cache_freq: Optional[int] = None
     thinking_budget_enabled: Optional[bool] = None
     thinking_budget_tokens: Optional[int] = None
+    # Weight quantization ("4bit", "8bit", or None)
+    quantization: Optional[str] = None
     # TurboQuant KV cache (experimental)
     turboquant_kv_enabled: Optional[bool] = None
     turboquant_kv_bits: Optional[int] = None
@@ -1313,6 +1315,7 @@ async def list_models(is_admin: bool = Depends(require_admin)):
                 "forced_ct_kwargs": settings.forced_ct_kwargs,
                 "ttl_seconds": settings.ttl_seconds,
                 "index_cache_freq": settings.index_cache_freq,
+                "quantization": settings.quantization,
                 "turboquant_kv_enabled": settings.turboquant_kv_enabled,
                 "turboquant_kv_bits": settings.turboquant_kv_bits,
                 "specprefill_enabled": settings.specprefill_enabled,
@@ -1519,6 +1522,15 @@ async def update_model_settings(
             if request.index_cache_freq and request.index_cache_freq >= 2
             else None
         )
+    # Weight quantization
+    if "quantization" in sent:
+        q = (request.quantization or "").lower().strip() or None
+        if q and q not in ("4bit", "int4", "8bit", "int8"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid quantization value: {request.quantization!r}. Use '4bit' or '8bit'.",
+            )
+        current_settings.quantization = q
     # TurboQuant KV cache settings
     if "turboquant_kv_enabled" in sent:
         current_settings.turboquant_kv_enabled = request.turboquant_kv_enabled or False
@@ -1553,6 +1565,7 @@ async def update_model_settings(
         and (
             ("model_type_override" in sent and entry.engine_type != prev_engine_type)
             or "index_cache_freq" in sent
+            or "quantization" in sent
         )
     )
     if requires_reload:

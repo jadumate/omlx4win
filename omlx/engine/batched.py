@@ -140,10 +140,13 @@ class BatchedEngine(BaseEngine):
         # Load model on the global torch executor
         from ..utils.model_loading import load_text_model
 
+        quantization = getattr(self._model_settings, "quantization", None)
+
         def _load_model_sync():
             return load_text_model(
                 self._model_name,
                 tokenizer_config=tokenizer_config,
+                quantization=quantization,
             )
 
         loop = asyncio.get_running_loop()

@@ -12,20 +12,67 @@ logger = logging.getLogger(__name__)
 def load_text_model(
     model_name: str,
     tokenizer_config: dict[str, Any] | None = None,
+    quantization: str | None = None,
 ):
-    """Load an LLM model/tokenizer pair via transformers."""
+    """Load an LLM model/tokenizer pair via transformers.
+
+    Args:
+        model_name: HuggingFace model name or local path.
+        tokenizer_config: Extra kwargs for AutoTokenizer.from_pretrained.
+        quantization: Weight quantization mode. Supported values:
+            - "4bit": 4-bit NF4 quantization via bitsandbytes (CUDA only).
+            - "8bit": 8-bit INT8 quantization via bitsandbytes (CUDA only).
+            - None: Full precision (float16 on CUDA, float32 on CPU).
+    """
     from transformers import AutoModelForCausalLM, AutoTokenizer
     import torch
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, **(tokenizer_config or {}))
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-        device_map="auto" if device == "cuda" else None,
-        trust_remote_code=True,
-    )
-    if device == "cpu":
+
+    load_kwargs: dict[str, Any] = {
+        "trust_remote_code": True,
+    }
+
+    quant_mode = (quantization or "").lower().strip()
+    if quant_mode in ("4bit", "int4") and device == "cuda":
+        try:
+            from transformers import BitsAndBytesConfig
+            load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_use_double_quant=True,
+            )
+            load_kwargs["device_map"] = "auto"
+            logger.info(f"Loading {model_name} with 4-bit NF4 quantization")
+        except ImportError:
+            logger.warning("bitsandbytes not installed — falling back to fp16")
+            load_kwargs["torch_dtype"] = torch.float16
+            load_kwargs["device_map"] = "auto"
+    elif quant_mode in ("8bit", "int8") and device == "cuda":
+        try:
+            from transformers import BitsAndBytesConfig
+            load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+            load_kwargs["device_map"] = "auto"
+            logger.info(f"Loading {model_name} with 8-bit INT8 quantization")
+        except ImportError:
+            logger.warning("bitsandbytes not installed — falling back to fp16")
+            load_kwargs["torch_dtype"] = torch.float16
+            load_kwargs["device_map"] = "auto"
+    elif quant_mode and device == "cpu":
+        logger.warning(
+            f"Quantization '{quantization}' requires CUDA — loading in fp32 on CPU"
+        )
+        load_kwargs["torch_dtype"] = torch.float32
+    elif device == "cuda":
+        load_kwargs["torch_dtype"] = torch.float16
+        load_kwargs["device_map"] = "auto"
+    else:
+        load_kwargs["torch_dtype"] = torch.float32
+
+    model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
+    if device == "cpu" and "device_map" not in load_kwargs:
         model = model.to(device)
     model.eval()
     return model, tokenizer

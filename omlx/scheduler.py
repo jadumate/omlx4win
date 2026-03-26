@@ -84,7 +84,14 @@ class SchedulerOutput:
 class _RequestState:
     """State for an in-progress generation request."""
 
-    def __init__(self, request: Request, model: Any, tokenizer: Any, device: str):
+    def __init__(
+        self,
+        request: Request,
+        model: Any,
+        tokenizer: Any,
+        device: str,
+        tq_bits: int = 0,
+    ):
         self.request = request
         self.model = model
         self.tokenizer = tokenizer
@@ -94,6 +101,21 @@ class _RequestState:
         self.last_token_id: Optional[int] = None
         self.is_prefilled = False
         self._step_count = 0
+        # TurboQuant KV compression (0 = disabled)
+        self._tq_bits = tq_bits
+        self._tq_cache = None  # TorchTurboQuantKVCache when active
+
+    def _compress_kv(self, past_key_values) -> None:
+        """Compress past_key_values into self._tq_cache."""
+        from .turboquant_kv import TorchTurboQuantKVCache
+        self._tq_cache = TorchTurboQuantKVCache(past_key_values, bits=self._tq_bits)
+        self.past_key_values = None  # free fp16 tensors
+
+    def _decompress_kv(self):
+        """Decompress self._tq_cache back to past_key_values."""
+        if self._tq_cache is not None:
+            self.past_key_values = self._tq_cache.decompress()
+            self._tq_cache = None
 
     def prefill(self) -> int:
         """Run the initial prefill and return the first generated token."""
@@ -108,17 +130,22 @@ class _RequestState:
         self.attention_mask = torch.ones_like(input_ids)
         with torch.no_grad():
             out = self.model(input_ids=input_ids, attention_mask=self.attention_mask, use_cache=True)
-        self.past_key_values = out.past_key_values
         sp = self.request.sampling_params
         token_id = self._sample(out.logits[0, -1], sp)
         self.last_token_id = token_id
         self.is_prefilled = True
+        if self._tq_bits:
+            self._compress_kv(out.past_key_values)
+        else:
+            self.past_key_values = out.past_key_values
         return token_id
 
     def decode_step(self) -> int:
         """Run one decode step and return the next token."""
         import torch
         assert self.last_token_id is not None
+        if self._tq_bits:
+            self._decompress_kv()
         input_ids = torch.tensor([[self.last_token_id]]).to(self.device)
         self.attention_mask = torch.cat(
             [self.attention_mask, torch.ones((1, 1), device=self.device)], dim=1
@@ -130,11 +157,14 @@ class _RequestState:
                 past_key_values=self.past_key_values,
                 use_cache=True,
             )
-        self.past_key_values = out.past_key_values
         sp = self.request.sampling_params
         token_id = self._sample(out.logits[0, -1], sp)
         self.last_token_id = token_id
         self._step_count += 1
+        if self._tq_bits:
+            self._compress_kv(out.past_key_values)
+        else:
+            self.past_key_values = out.past_key_values
         return token_id
 
     def _sample(self, logits: Any, sp: SamplingParams) -> int:
@@ -158,6 +188,7 @@ class _RequestState:
         """Release KV cache memory."""
         self.past_key_values = None
         self.attention_mask = None
+        self._tq_cache = None
 
 
 class Scheduler:
@@ -189,6 +220,8 @@ class Scheduler:
         self._memory_limit_bytes: int = 0
         self._memory_hard_limit_bytes: int = 0
         self._prefill_memory_guard: bool = False
+        # TurboQuant KV compression (0 = disabled; set by BatchedEngine after start)
+        self._turboquant_kv_bits: int = 0
 
     def _get_device(self) -> str:
         try:
@@ -229,7 +262,10 @@ class Scheduler:
             while self._waiting and len(self._running) < self.config.max_num_seqs:
                 req = self._waiting.popleft()
                 req.status = RequestStatus.RUNNING
-                state = _RequestState(req, self.model, self.tokenizer, self._device)
+                state = _RequestState(
+                    req, self.model, self.tokenizer, self._device,
+                    tq_bits=self._turboquant_kv_bits,
+                )
                 self._running[req.request_id] = state
 
         if not self._running:
