@@ -233,22 +233,47 @@ class TorchTurboQuantKVCache:
             self._codecs[dim] = TorchTurboQuantCodec(dim, self.bits, self.seed, device)
         return self._codecs[dim]
 
+    @staticmethod
+    def _iter_kv(past_key_values):
+        """Normalize past_key_values to an iterable of (key, value) tensor pairs.
+
+        Newer transformers returns a DynamicCache / Cache object instead of a
+        plain tuple-of-tuples.  Handle both formats transparently.
+        """
+        # transformers Cache objects (DynamicCache, HybridCache, etc.)
+        if hasattr(past_key_values, 'key_cache') and hasattr(past_key_values, 'value_cache'):
+            return zip(past_key_values.key_cache, past_key_values.value_cache)
+        return past_key_values
+
     def _compress(self, past_key_values) -> None:
-        for k, v in past_key_values:
+        for k, v in self._iter_kv(past_key_values):
             dim = k.shape[-1]
             codec = self._get_codec(dim, str(k.device))
             k_norms, k_packed = codec.quantize(k)
             v_norms, v_packed = codec.quantize(v)
             self._compressed.append((codec, k_norms, k_packed, v_norms, v_packed))
 
-    def decompress(self) -> tuple:
-        """Return decompressed past_key_values (tuple of (K, V) per layer)."""
-        result = []
+    def decompress(self):
+        """Return decompressed past_key_values.
+
+        Returns a DynamicCache when available (transformers >= 4.36), otherwise
+        falls back to the legacy tuple-of-tuples format.
+        """
+        kv_pairs = []
         for (codec, k_norms, k_packed, v_norms, v_packed) in self._compressed:
             k = codec.dequantize(k_norms, k_packed)
             v = codec.dequantize(v_norms, v_packed)
-            result.append((k, v))
-        return tuple(result)
+            kv_pairs.append((k, v))
+
+        try:
+            from transformers import DynamicCache
+            cache = DynamicCache()
+            for k, v in kv_pairs:
+                cache.key_cache.append(k)
+                cache.value_cache.append(v)
+            return cache
+        except Exception:
+            return tuple(kv_pairs)
 
     @property
     def nbytes(self) -> int:
