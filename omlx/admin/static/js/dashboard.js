@@ -785,6 +785,10 @@
                                 this.wqTq[m.id] = m.settings?.turboquant_kv_enabled || false;
                                 this.wqTqBits[m.id] = m.settings?.turboquant_kv_bits || 4;
                             }
+                            // Always ensure wqSaving is a plain boolean — Alpine proxy
+                            // returns a truthy wrapper for uninitialised keys, which
+                            // would permanently gray the Apply button.
+                            if (this.wqSaving[m.id] !== true) this.wqSaving[m.id] = false;
                         }
                     } else if (response.status === 401) {
                         window.location.href = '/admin';

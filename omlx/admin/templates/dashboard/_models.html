@@ -1094,7 +1094,7 @@
                                             </div>
                                             <!-- Apply -->
                                             <button @click="applyWeightQuant(m.id)"
-                                                    :disabled="wqSaving[m.id]"
+                                                    :disabled="wqSaving[m.id] === true"
                                                     class="px-3 py-1.5 bg-neutral-900 text-white text-xs font-semibold rounded-lg hover:bg-neutral-700 disabled:opacity-50 transition-colors shrink-0 flex items-center gap-1.5">
                                                 <svg x-show="wqSaving[m.id]" x-cloak class="animate-spin w-3 h-3" viewBox="0 0 24 24" fill="none">
                                                     <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
