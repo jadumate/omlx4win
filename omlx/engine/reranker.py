@@ -13,9 +13,7 @@ import gc
 import logging
 from typing import Any, Dict
 
-import mlx.core as mx
-
-from ..engine_core import get_mlx_executor
+from ..engine_core import get_torch_executor as get_mlx_executor
 from ..models.reranker import MLXRerankerModel, RerankOutput
 from .base import BaseNonStreamingEngine
 
@@ -82,10 +80,13 @@ class RerankerEngine(BaseNonStreamingEngine):
         self._model = None
 
         gc.collect()
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            get_mlx_executor(), lambda: (mx.synchronize(), mx.clear_cache())
-        )
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
         logger.info(f"Reranker engine stopped: {self._model_name}")
 
     async def rerank(

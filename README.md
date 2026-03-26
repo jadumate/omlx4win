@@ -6,13 +6,14 @@
   </picture>
 </p>
 
-<h1 align="center">oMLX</h1>
-<p align="center"><b>LLM inference, optimized for your Mac</b><br>Continuous batching and tiered KV caching, managed directly from your menu bar.</p>
+<h1 align="center">oMLX — Windows Edition</h1>
+<p align="center"><b>LLM inference server for Windows</b><br>Continuous batching · OpenAI-compatible API · Admin dashboard · torch + transformers backend</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License">
   <img src="https://img.shields.io/badge/python-3.10+-green" alt="Python 3.10+">
-  <img src="https://img.shields.io/badge/platform-Apple%20Silicon-black?logo=apple" alt="Apple Silicon">
+  <img src="https://img.shields.io/badge/platform-Windows-0078D6?logo=windows" alt="Windows">
+  <img src="https://img.shields.io/badge/backend-PyTorch-EE4C2C?logo=pytorch" alt="PyTorch">
   <a href="https://buymeacoffee.com/jundot"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?logo=buy-me-a-coffee&logoColor=black" alt="Buy Me a Coffee"></a>
 </p>
 
@@ -26,15 +27,7 @@
   <a href="#features">Features</a> ·
   <a href="#models">Models</a> ·
   <a href="#cli-configuration">CLI Configuration</a> ·
-  <a href="https://omlx.ai/benchmarks">Benchmarks</a> ·
   <a href="https://omlx.ai">oMLX.ai</a>
-</p>
-
-<p align="center">
-  <b>English</b> ·
-  <a href="README.zh.md">中文</a> ·
-  <a href="README.ko.md">한국어</a> ·
-  <a href="README.ja.md">日本語</a>
 </p>
 
 ---
@@ -43,82 +36,86 @@
   <img src="docs/images/omlx_dashboard.png" alt="oMLX Admin Dashboard" width="800">
 </p>
 
-> *Every LLM server I tried made me choose between convenience and control. I wanted to pin everyday models in memory, auto-swap heavier ones on demand, set context limits - and manage it all from a menu bar.*
->
-> *oMLX persists KV cache across a hot in-memory tier and cold SSD tier - even when context changes mid-conversation, all past context stays cached and reusable across requests, making local LLMs practical for real coding work with tools like Claude Code. That's why I built it.*
+> *This is the Windows port of oMLX, rewritten to run on PyTorch + HuggingFace Transformers instead of Apple's MLX framework. The original project targeted Apple Silicon — this version brings the same server, API, and admin dashboard to Windows with NVIDIA CUDA or CPU.*
+
+---
+
+## What's Different from the Original
+
+| Feature | Original (macOS/MLX) | This Version (Windows/torch) |
+|---------|---------------------|------------------------------|
+| Inference backend | Apple MLX (Metal GPU) | PyTorch (CUDA / CPU) |
+| Model format | MLX safetensors | HuggingFace safetensors / PyTorch |
+| Platform | macOS 15+, Apple Silicon | Windows 10/11, Python 3.10+ |
+| Menu bar app | Native PyObjC | Not included (server only) |
+| KV cache tiers | Hot RAM + Cold SSD | In-process KV cache (past_key_values) |
+| Quantization (oQ) | MLX-native | Not available in this port |
+| TurboQuant KV | MLX Metal | Not available in this port |
+
+The server, admin dashboard, OpenAI-compatible API, multi-model serving, and all HTTP endpoints are identical.
+
+---
 
 ## Install
 
-### macOS App
+### Requirements
 
-Download the `.dmg` from [Releases](https://github.com/jundot/omlx/releases), drag to Applications, done. The app includes in-app auto-update, so future upgrades are just one click.
+- Windows 10 or Windows 11
+- Python 3.10+
+- NVIDIA GPU with CUDA 11.8+ (recommended) — CPU inference also works
 
-### Homebrew
+### 1. Install PyTorch
 
-```bash
-brew tap jundot/omlx https://github.com/jundot/omlx
-brew install omlx
+Visit [pytorch.org](https://pytorch.org/get-started/locally/) and select your CUDA version, or use one of these:
 
-# Upgrade to the latest version
-brew update && brew upgrade omlx
+```powershell
+# CUDA 12.1 (recommended for RTX 30/40 series)
+pip install torch --index-url https://download.pytorch.org/whl/cu121
 
-# Run as a background service (auto-restarts on crash)
-brew services start omlx
+# CUDA 11.8 (older GPUs)
+pip install torch --index-url https://download.pytorch.org/whl/cu118
 
-# Optional: MCP (Model Context Protocol) support
-/opt/homebrew/opt/omlx/libexec/bin/pip install mcp
+# CPU only
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 ```
 
-### From Source
+### 2. Install oMLX
 
-```bash
+```powershell
 git clone https://github.com/jundot/omlx.git
 cd omlx
-pip install -e .          # Core only
-pip install -e ".[mcp]"   # With MCP (Model Context Protocol) support
+pip install -e .
+
+# With MCP (Model Context Protocol) support
+pip install -e ".[mcp]"
 ```
 
-Requires macOS 15.0+ (Sequoia), Python 3.10+, and Apple Silicon (M1/M2/M3/M4).
+### Verify
+
+```powershell
+python -c "import torch; print('CUDA:', torch.cuda.is_available(), '| GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'none')"
+omlx --help
+```
+
+---
 
 ## Quickstart
 
-### macOS App
-
-Launch oMLX from your Applications folder. The Welcome screen guides you through three steps - model directory, server start, and first model download. That's it. To connect OpenClaw, OpenCode, or Codex, see [Integrations](#integrations).
-
-<p align="center">
-  <img src="docs/images/Screenshot 2026-02-10 at 00.36.32.png" alt="oMLX Welcome Screen" width="360">
-  <img src="docs/images/Screenshot 2026-02-10 at 00.34.30.png" alt="oMLX Menubar" width="240">
-</p>
-
-### CLI
-
-```bash
-omlx serve --model-dir ~/models
+```powershell
+omlx serve --model-dir C:\models
 ```
 
-The server discovers LLMs, VLMs, embedding models, and rerankers from subdirectories automatically. Any OpenAI-compatible client can connect to `http://localhost:8000/v1`. A built-in chat UI is also available at `http://localhost:8000/admin/chat`.
+The server discovers LLMs, VLMs, embedding models, and rerankers from subdirectories automatically and starts on `http://localhost:8000`.
 
-### Homebrew Service
+- **Admin dashboard**: `http://localhost:8000/admin`
+- **Chat UI**: `http://localhost:8000/admin/chat`
+- **API**: `http://localhost:8000/v1` (OpenAI-compatible)
 
-If you installed via Homebrew, you can run oMLX as a managed background service:
+Any OpenAI-compatible client can connect by setting `base_url = "http://localhost:8000/v1"`.
 
-```bash
-brew services start omlx    # Start (auto-restarts on crash)
-brew services stop omlx     # Stop
-brew services restart omlx  # Restart
-brew services info omlx     # Check status
-```
-
-The service runs `omlx serve` with zero-config defaults (`~/.omlx/models`, port 8000). To customize, either set environment variables (`OMLX_MODEL_DIR`, `OMLX_PORT`, etc.) or run `omlx serve --model-dir /your/path` once to persist settings to `~/.omlx/settings.json`.
-
-Logs are written to two locations:
-- **Service log**: `$(brew --prefix)/var/log/omlx.log` (stdout/stderr)
-- **Server log**: `~/.omlx/logs/server.log` (structured application log)
+---
 
 ## Features
-
-Supports text LLMs, vision-language models (VLM), OCR models, embeddings, and rerankers on Apple Silicon.
 
 ### Admin Dashboard
 
@@ -128,94 +125,47 @@ Web UI at `/admin` for real-time monitoring, model management, chat, benchmark, 
   <img src="docs/images/Screenshot 2026-02-10 at 00.45.34.png" alt="oMLX Admin Dashboard" width="720">
 </p>
 
-### Vision-Language Models
+### Multi-Model Serving
 
-Run VLMs with the same continuous batching and tiered KV cache stack as text LLMs. Supports multi-image chat, base64/URL/file image inputs, and tool calling with vision context. OCR models (DeepSeek-OCR, DOTS-OCR, GLM-OCR) are auto-detected with optimized prompts.
+Load LLMs, VLMs, embedding models, and rerankers in the same server process. Memory is managed automatically:
 
-### Tiered KV Cache (Hot + Cold)
-
-Block-based KV cache management inspired by vLLM, with prefix sharing and Copy-on-Write. The cache operates across two tiers:
-
-- **Hot tier (RAM)**: Frequently accessed blocks stay in memory for fast access.
-- **Cold tier (SSD)**: When the hot cache fills up, blocks are offloaded to SSD in safetensors format. On the next request with a matching prefix, they're restored from disk instead of recomputed from scratch - even after a server restart.
-
-<p align="center">
-  <img src="docs/images/omlx_hot_cold_cache.png" alt="oMLX Hot & Cold Cache" width="720">
-</p>
+- **LRU eviction** — least-recently-used models are unloaded when memory runs low
+- **Manual load/unload** — control model loading from the admin panel
+- **Model pinning** — keep specific models always resident
+- **Per-model TTL** — auto-unload idle models after a configurable timeout
+- **Process memory limit** — set a total memory ceiling to prevent OOM
 
 ### Continuous Batching
 
-Handles concurrent requests through mlx-lm's BatchGenerator. Prefill and completion batch sizes are configurable.
+Handles concurrent requests using per-request KV cache (torch `past_key_values`). Each request streams tokens independently while sharing the same GPU.
 
-### Claude Code Optimization
+### Vision-Language Models
 
-Context scaling support for running smaller context models with Claude Code. Scales reported token counts so that auto-compact triggers at the right timing, and SSE keep-alive prevents read timeouts during long prefill.
-
-### Multi-Model Serving
-
-Load LLMs, VLMs, embedding models, and rerankers within the same server. Models are managed through a combination of automatic and manual controls:
-
-- **LRU eviction**: Least-recently-used models are evicted automatically when memory runs low.
-- **Manual load/unload**: Interactive status badges in the admin panel let you load or unload models on demand.
-- **Model pinning**: Pin frequently used models to keep them always loaded.
-- **Per-model TTL**: Set an idle timeout per model to auto-unload after a period of inactivity.
-- **Process memory enforcement**: Total memory limit (default: system RAM - 8GB) prevents system-wide OOM.
-
-### Per-Model Settings
-
-Configure sampling parameters, chat template kwargs, TTL, model alias, model type override, and more per model directly from the admin panel. Changes apply immediately without server restart.
-
-- **Model alias**: set a custom API-visible name. `/v1/models` returns the alias, and requests accept both the alias and directory name.
-- **Model type override**: manually set a model as LLM or VLM regardless of auto-detection.
-
-<p align="center">
-  <img src="docs/images/omlx_ChatTemplateKwargs.png" alt="oMLX Chat Template Kwargs" width="480">
-</p>
+Run VLMs via `transformers.AutoModelForVision2Seq`. Supports multi-image chat, base64/URL/file image inputs, and OCR models.
 
 ### Built-in Chat
 
-Chat directly with any loaded model from the admin panel. Supports conversation history, model switching, dark mode, reasoning model output, and image upload for VLM/OCR models.
+Chat with any loaded model directly from the admin panel. Supports conversation history, model switching, dark mode, reasoning model output, and image upload for VLM/OCR models.
 
 <p align="center">
   <img src="docs/images/ScreenShot_2026-03-14_104350_610.png" alt="oMLX Chat" width="720">
 </p>
 
-
 ### Model Downloader
 
-Search and download MLX models from HuggingFace directly in the admin dashboard. Browse model cards, check file sizes, and download with one click.
+Search and download models from HuggingFace directly in the admin dashboard.
 
 <p align="center">
   <img src="docs/images/downloader_omlx.png" alt="oMLX Model Downloader" width="720">
 </p>
 
-### Integrations
+### Per-Model Settings
 
-Set up OpenClaw, OpenCode, and Codex directly from the admin dashboard with a single click. No manual config editing required.
-
-<p align="center">
-  <img src="docs/images/omlx_integrations.png" alt="oMLX Integrations" width="720">
-</p>
-
-### Performance Benchmark
-
-One-click benchmarking from the admin panel. Measures prefill (PP) and text generation (TG) tokens per second, with partial prefix cache hit testing for realistic performance numbers.
-
-<p align="center">
-  <img src="docs/images/benchmark_omlx.png" alt="oMLX Benchmark Tool" width="720">
-</p>
-
-### macOS Menubar App
-
-Native PyObjC menubar app (not Electron). Start, stop, and monitor the server without opening a terminal. Includes persistent serving stats (survives restarts), auto-restart on crash, and in-app auto-update.
-
-<p align="center">
-  <img src="docs/images/Screenshot 2026-02-10 at 00.51.54.png" alt="oMLX Menubar Stats" width="400">
-</p>
+Configure sampling parameters, chat template kwargs, TTL, model alias, model type override, and more per model from the admin panel — no server restart needed.
 
 ### API Compatibility
 
-Drop-in replacement for OpenAI and Anthropic APIs. Supports streaming usage stats (`stream_options.include_usage`), Anthropic adaptive thinking, and vision inputs (base64, URL).
+Drop-in replacement for OpenAI and Anthropic APIs.
 
 | Endpoint | Description |
 |----------|-------------|
@@ -226,76 +176,92 @@ Drop-in replacement for OpenAI and Anthropic APIs. Supports streaming usage stat
 | `POST /v1/rerank` | Document reranking |
 | `GET /v1/models` | List available models |
 
-### Tool Calling & Structured Output
+### Tool Calling
 
-Supports all function calling formats available in mlx-lm, JSON schema validation, and MCP tool integration. Tool calling requires the model's chat template to support the `tools` parameter. The following model families are auto-detected via mlx-lm's built-in tool parsers:
+Supports function calling via the model's chat template `tools` parameter. Works with any HuggingFace model whose tokenizer supports `apply_chat_template(tools=...)`.
 
-| Model Family | Format |
-|---|---|
-| Llama, Qwen, DeepSeek, etc. | JSON `<tool_call>` |
-| Qwen3.5 Series | XML `<function=...>` |
-| Gemma | `<start_function_call>` |
-| GLM (4.7, 5) | `<arg_key>/<arg_value>` XML |
-| MiniMax | Namespaced `<minimax:tool_call>` |
-| Mistral | `[TOOL_CALLS]` |
-| Kimi K2 | `<\|tool_calls_section_begin\|>` |
-| Longcat | `<longcat_tool_call>` |
+### Claude Code Integration
 
-Models not listed above may still work if their chat template accepts `tools` and their output uses a recognized `<tool_call>` XML format. For tool-enabled streaming, assistant text is emitted incrementally while known tool-call control markup is suppressed from visible content; structured tool calls are emitted after parsing the completed turn.
+Works as a local API backend for Claude Code. SSE keep-alive prevents read timeouts during long prefill, and context scaling support helps trigger auto-compact at the right time.
+
+### MCP Support
+
+Use oMLX as an MCP server or connect to external MCP tools:
+
+```powershell
+pip install "omlx[mcp]"
+omlx serve --model-dir C:\models --mcp-config mcp.json
+```
+
+---
 
 ## Models
 
-Point `--model-dir` at a directory containing MLX-format model subdirectories. Two-level organization folders (e.g., `mlx-community/model-name/`) are also supported.
+Point `--model-dir` at a directory containing HuggingFace model subdirectories. Two-level organization (`org/model-name/`) is also supported.
 
 ```
-~/models/
-├── Step-3.5-Flash-8bit/
-├── Qwen3-Coder-Next-8bit/
-├── gpt-oss-120b-MXFP4-Q8/
-├── Qwen3.5-122B-A10B-4bit/
-└── bge-m3/
+C:\models\
+├── Llama-3.2-3B-Instruct\
+├── Qwen2.5-7B-Instruct\
+├── mistral-7b-instruct-v0.3\
+├── bge-m3\
+└── bge-reranker-v2-m3\
 ```
 
-Models are auto-detected by type. You can also download models directly from the admin dashboard.
+Models are auto-detected by architecture. You can also download models from the admin dashboard.
 
-| Type | Models |
-|------|--------|
-| LLM | Any model supported by [mlx-lm](https://github.com/ml-explore/mlx-lm) |
-| VLM | Qwen3.5 Series, GLM-4V, Pixtral, and other [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) models |
-| OCR | DeepSeek-OCR, DOTS-OCR, GLM-OCR |
-| Embedding | BERT, BGE-M3, ModernBERT |
-| Reranker | ModernBERT, XLM-RoBERTa |
+| Type | Detection | Examples |
+|------|-----------|---------|
+| LLM | `AutoModelForCausalLM` | Llama, Qwen, Mistral, DeepSeek, Gemma |
+| VLM | Vision architecture detected | LLaVA, Qwen2-VL, InternVL |
+| Embedding | BERT/RoBERTa/E5 architecture | BGE-M3, all-MiniLM, ModernBERT |
+| Reranker | SequenceClassification or CausalLM reranker | BGE-reranker, Qwen3-Reranker |
+
+> **Model format**: This Windows port uses standard HuggingFace models (safetensors or PyTorch `.bin`). The original oMLX used MLX-converted models from `mlx-community`. For best CUDA performance, use `float16` weights. 4-bit quantization works via `bitsandbytes` (install separately with `pip install bitsandbytes`).
+
+---
 
 ## CLI Configuration
 
-```bash
+```powershell
+# Basic serve
+omlx serve --model-dir C:\models
+
 # Memory limit for loaded models
-omlx serve --model-dir ~/models --max-model-memory 32GB
+omlx serve --model-dir C:\models --max-model-memory 16GB
 
-# Process-level memory limit (default: auto = RAM - 8GB)
-omlx serve --model-dir ~/models --max-process-memory 80%
+# Adjust concurrent request limit
+omlx serve --model-dir C:\models --max-num-seqs 8
 
-# Enable SSD cache for KV blocks
-omlx serve --model-dir ~/models --paged-ssd-cache-dir ~/.omlx/cache
-
-# Set in-memory hot cache size
-omlx serve --model-dir ~/models --hot-cache-max-size 20%
-
-# Adjust batch sizes
-omlx serve --model-dir ~/models --prefill-batch-size 8 --completion-batch-size 32
+# Custom host and port
+omlx serve --model-dir C:\models --host 0.0.0.0 --port 8080
 
 # With MCP tools
-omlx serve --model-dir ~/models --mcp-config mcp.json
+omlx serve --model-dir C:\models --mcp-config mcp.json
 
 # HuggingFace mirror endpoint (for restricted regions)
-omlx serve --model-dir ~/models --hf-endpoint https://hf-mirror.com
+omlx serve --model-dir C:\models --hf-endpoint https://hf-mirror.com
 
 # API key authentication
-omlx serve --model-dir ~/models --api-key your-secret-key
-# Localhost-only: skip verification via admin panel global settings
+omlx serve --model-dir C:\models --api-key your-secret-key
+
+# Set log level
+omlx serve --model-dir C:\models --log-level debug
 ```
 
-All settings can also be configured from the web admin panel at `/admin`. Settings are persisted to `~/.omlx/settings.json`, and CLI flags take precedence.
+All settings can also be configured from the web admin panel at `/admin`. Settings are persisted to `~\.omlx\settings.json`, and CLI flags take precedence.
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OMLX_MODEL_DIR` | `~/.omlx/models` | Model directory path |
+| `OMLX_PORT` | `8000` | Server port |
+| `OMLX_HOST` | `127.0.0.1` | Listen host |
+| `OMLX_API_KEY` | _(none)_ | API authentication key |
+| `OMLX_LOG_LEVEL` | `info` | Logging level |
+| `OMLX_HF_ENDPOINT` | _(HuggingFace)_ | HuggingFace mirror URL |
+| `OMLX_MCP_CONFIG` | _(none)_ | MCP configuration file |
 
 <details>
 <summary>Architecture</summary>
@@ -304,71 +270,53 @@ All settings can also be configured from the web admin panel at `/admin`. Settin
 FastAPI Server (OpenAI / Anthropic API)
     │
     ├── EnginePool (multi-model, LRU eviction, TTL, manual load/unload)
-    │   ├── BatchedEngine (LLMs, continuous batching)
-    │   ├── VLMEngine (vision-language models)
-    │   ├── EmbeddingEngine
-    │   └── RerankerEngine
+    │   ├── BatchedEngine  (LLMs — torch AutoModelForCausalLM)
+    │   ├── VLMEngine      (vision-language — torch AutoModelForVision2Seq)
+    │   ├── EmbeddingEngine (torch AutoModel + mean pooling)
+    │   └── RerankerEngine  (torch AutoModelForSequenceClassification)
     │
     ├── ProcessMemoryEnforcer (total memory limit, TTL checks)
     │
-    ├── Scheduler (FCFS, configurable batch sizes)
-    │   └── mlx-lm BatchGenerator
-    │
-    └── Cache Stack
-        ├── PagedCacheManager (GPU, block-based, CoW, prefix sharing)
-        ├── Hot Cache (in-memory tier, write-back)
-        └── PagedSSDCacheManager (SSD cold tier, safetensors format)
+    └── Scheduler (FCFS, per-request past_key_values streaming)
 ```
 
 </details>
 
+---
+
 ## Development
 
-### CLI Server
-
-```bash
+```powershell
 git clone https://github.com/jundot/omlx.git
 cd omlx
 pip install -e ".[dev]"
 pytest -m "not slow"
 ```
 
-### macOS App
-
-Requires Python 3.11+ and [venvstacks](https://venvstacks.lmstudio.ai) (`pip install venvstacks`).
-
-```bash
-cd packaging
-
-# Full build (venvstacks + app bundle + DMG)
-python build.py
-
-# Skip venvstacks (code changes only)
-python build.py --skip-venv
-
-# DMG only
-python build.py --dmg-only
-```
-
-See [packaging/README.md](packaging/README.md) for details on the app bundle structure and layer configuration.
+---
 
 ## Contributing
 
 Contributions are welcome! See [Contributing Guide](docs/CONTRIBUTING.md) for details.
 
 - Bug fixes and improvements
-- Performance optimizations
-- Documentation improvements
+- Performance optimizations (batched decode, paged attention)
+- Additional model support
+- Documentation
+
+---
 
 ## License
 
 [Apache 2.0](LICENSE)
 
+---
+
 ## Acknowledgments
 
-- [MLX](https://github.com/ml-explore/mlx) and [mlx-lm](https://github.com/ml-explore/mlx-lm) by Apple
-- [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) - Vision-language model inference on Apple Silicon
-- [vllm-mlx](https://github.com/waybarrios/vllm-mlx) - oMLX started from vllm-mlx v0.1.0 and evolved significantly with multi-model serving, tiered KV caching, VLM with full paged cache support, an admin panel, and a macOS menu bar app
-- [venvstacks](https://venvstacks.lmstudio.ai) - Portable Python environment layering for the macOS app bundle
-- [mlx-embeddings](https://github.com/Blaizzy/mlx-embeddings) - Embedding model support for Apple Silicon
-- [llm-compressor](https://github.com/vllm-project/llm-compressor) - Reference AWQ implementation for MoE models, used as design reference for oQ weight equalization
+- [vllm-mlx](https://github.com/waybarrios/vllm-mlx) — oMLX's continuous batching architecture originated from vllm-mlx
+- [HuggingFace Transformers](https://github.com/huggingface/transformers) — model loading and inference backbone for this Windows port
+- [PyTorch](https://pytorch.org) — inference backend
+- [MLX](https://github.com/ml-explore/mlx) and [mlx-lm](https://github.com/ml-explore/mlx-lm) by Apple — the original backend (macOS version)
+- [mlx-vlm](https://github.com/Blaizzy/mlx-vlm) — VLM support in the original
+- [mlx-embeddings](https://github.com/Blaizzy/mlx-embeddings) — embedding support in the original

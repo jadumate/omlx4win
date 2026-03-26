@@ -23,8 +23,6 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:
     from .model_settings import ModelSettingsManager
 
-import mlx.core as mx
-
 from .engine import BaseEngine, BatchedEngine
 from .engine.embedding import EmbeddingEngine
 from .engine.reranker import RerankerEngine
@@ -37,7 +35,7 @@ from .exceptions import (
     ModelTooLargeError,
 )
 from .model_discovery import DiscoveredModel, discover_models, format_size
-from .engine_core import get_mlx_executor
+from .engine_core import get_torch_executor as get_mlx_executor
 from .scheduler import SchedulerConfig
 
 logger = logging.getLogger(__name__)
@@ -353,7 +351,11 @@ class EnginePool:
                 enforcer = self._process_memory_enforcer
                 if enforcer.max_bytes > 0:
                     while True:
-                        current_active = mx.get_active_memory()
+                        try:
+                            import psutil
+                            current_active = psutil.virtual_memory().used
+                        except Exception:
+                            current_active = 0
                         projected = current_active + entry.estimated_size
                         if projected <= enforcer.max_bytes:
                             break
@@ -463,10 +465,13 @@ class EnginePool:
         # Synchronize before clearing to prevent releasing Metal buffers
         # still referenced by in-flight command buffers. See issue #300.
         gc.collect()
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            get_mlx_executor(), lambda: (mx.synchronize(), mx.clear_cache())
-        )
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
 
         logger.info(
             f"Unloaded model: {model_id}, "
@@ -533,11 +538,13 @@ class EnginePool:
                     except Exception:
                         pass
                     gc.collect()
-                    loop = asyncio.get_running_loop()
-                    await loop.run_in_executor(
-                        get_mlx_executor(),
-                        lambda: (mx.synchronize(), mx.clear_cache()),
-                    )
+                    try:
+                        import torch
+                        if torch.cuda.is_available():
+                            torch.cuda.synchronize()
+                            torch.cuda.empty_cache()
+                    except Exception:
+                        pass
 
                     engine = BatchedEngine(
                         model_name=entry.model_path,
@@ -567,11 +574,13 @@ class EnginePool:
                         f"Error stopping aborted engine for {model_id}: {e}"
                     )
                 gc.collect()
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(
-                    get_mlx_executor(),
-                    lambda: (mx.synchronize(), mx.clear_cache()),
-                )
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                        torch.cuda.empty_cache()
+                except Exception:
+                    pass
                 raise ModelLoadingError(
                     f"Model {model_id} load aborted: "
                     f"process memory limit exceeded"

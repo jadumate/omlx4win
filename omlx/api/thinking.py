@@ -247,39 +247,11 @@ class ThinkingBudgetProcessor:
         self._end_id_set = set(think_end_token_ids)
 
     def __call__(self, tokens, logits):
-        """mlx-lm logits processor: (tokens, logits) -> logits."""
-        import mlx.core as mx
+        """Logits processor: (tokens, logits) -> logits.
 
-        if self._done:
-            return logits
-
-        # Post-forcing phase: suppress duplicate </think> tokens
-        if self._suppress_end:
-            return self._suppress_end_tokens(logits, mx)
-
-        # Skip state update on first call (tokens contains prompt tokens only)
-        if self._first_call:
-            self._first_call = False
-        elif tokens.size > 0:
-            last_token = tokens[-1].item()
-            self._update_state(last_token)
-
-        # If state changed by _update_state, handle immediately
-        if self._done:
-            return logits
-        if self._suppress_end:
-            return self._suppress_end_tokens(logits, mx)
-
-        if self._forcing:
-            return self._force_next_token(logits, mx)
-
-        if self._in_thinking:
-            self._thinking_tokens += 1
-            if self._thinking_tokens >= self._budget:
-                self._forcing = True
-                self._force_idx = 0
-                return self._force_next_token(logits, mx)
-
+        On the torch backend this processor is not used in the same way as
+        the original mlx-lm integration — return logits unchanged.
+        """
         return logits
 
     def _update_state(self, token_id: int) -> None:

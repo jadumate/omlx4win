@@ -20,8 +20,6 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, List, Optional, Set, Union
 
-import mlx.core as mx
-
 from .request import Request, RequestOutput, RequestStatus, SamplingParams
 from .scheduler import Scheduler, SchedulerConfig, SchedulerOutput
 from .output_collector import RequestOutputCollector, RequestStreamState
@@ -29,23 +27,25 @@ from .model_registry import get_registry, ModelOwnershipError
 
 logger = logging.getLogger(__name__)
 
-_global_mlx_executor: concurrent.futures.ThreadPoolExecutor | None = None
+_global_torch_executor: concurrent.futures.ThreadPoolExecutor | None = None
 
 
-def get_mlx_executor() -> concurrent.futures.ThreadPoolExecutor:
-    """Get or create the global MLX executor (lazy singleton).
+def get_torch_executor() -> concurrent.futures.ThreadPoolExecutor:
+    """Get or create the global torch executor (lazy singleton).
 
-    mlx-lm's BatchGenerator uses a module-level Metal stream
-    (generation_stream), so ALL MLX GPU operations across all models
-    MUST be serialized onto one thread to prevent Metal command buffer
-    races that cause segfaults. See issue #85.
+    All torch GPU operations across all models are serialized onto one
+    thread to prevent concurrent CUDA operations.
     """
-    global _global_mlx_executor
-    if _global_mlx_executor is None:
-        _global_mlx_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="mlx-global"
+    global _global_torch_executor
+    if _global_torch_executor is None:
+        _global_torch_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="torch-global"
         )
-    return _global_mlx_executor
+    return _global_torch_executor
+
+
+# Backward compatibility alias
+get_mlx_executor = get_torch_executor
 
 
 @dataclass
@@ -123,9 +123,7 @@ class EngineCore:
         self._steps_executed = 0
 
         # Global single-thread executor shared across ALL engines.
-        # mlx-lm uses a module-level Metal stream, so concurrent MLX calls
-        # from different engine threads cause segfaults. See issue #85.
-        self._mlx_executor = get_mlx_executor()
+        self._mlx_executor = get_torch_executor()
 
         logger.debug(f"Engine {self._engine_id} initialized")
 

@@ -127,10 +127,9 @@ class BatchedEngine(BaseEngine):
 
         import asyncio
 
-        from mlx_lm import load
-
         from ..engine_core import AsyncEngineCore, EngineConfig
         from ..scheduler import SchedulerConfig
+        from ..engine_core import get_torch_executor as get_mlx_executor
 
         # Build tokenizer config with model-specific fixes
         tokenizer_config = get_tokenizer_config(
@@ -138,12 +137,11 @@ class BatchedEngine(BaseEngine):
             trust_remote_code=self._trust_remote_code,
         )
 
-        # Load model on the global MLX executor to avoid blocking the event loop
-        # while ensuring no concurrent Metal operations. See issue #85.
-        from ..engine_core import get_mlx_executor
+        # Load model on the global torch executor
+        from ..utils.model_loading import load_text_model
 
         def _load_model_sync():
-            return load(
+            return load_text_model(
                 self._model_name,
                 tokenizer_config=tokenizer_config,
             )
@@ -153,12 +151,7 @@ class BatchedEngine(BaseEngine):
             get_mlx_executor(), _load_model_sync
         )
 
-        # Apply post-load transforms (e.g., IndexCache for DSA models)
-        from ..utils.model_loading import apply_post_load_transforms
-
-        self._model = apply_post_load_transforms(
-            self._model, self._model_settings
-        )
+        # Post-load transforms are mlx-lm specific — skip on torch backend
 
         # TurboQuant KV cache: patch attention and set kv_bits on scheduler
         if self._model_settings is not None:
@@ -194,22 +187,7 @@ class BatchedEngine(BaseEngine):
                 tq_bits = int(getattr(self._model_settings, "turboquant_kv_bits", 4))
                 self._engine.engine.scheduler._turboquant_kv_bits = tq_bits
 
-        # SpecPrefill: load draft model and pass to scheduler
-        if self._model_settings is not None:
-            specprefill_draft = getattr(self._model_settings, "specprefill_draft_model", None)
-            specprefill_enabled = getattr(self._model_settings, "specprefill_enabled", False)
-            if specprefill_enabled and specprefill_draft:
-                try:
-                    def _load_draft():
-                        draft_model, _ = load(specprefill_draft)
-                        return draft_model
-                    draft_model = await loop.run_in_executor(get_mlx_executor(), _load_draft)
-                    self._engine.engine.scheduler.set_specprefill_draft_model(
-                        draft_model, draft_model_name=specprefill_draft
-                    )
-                    logger.info(f"SpecPrefill: draft model loaded ({specprefill_draft})")
-                except Exception as e:
-                    logger.error(f"SpecPrefill: draft model load failed: {e}")
+        # SpecPrefill: not supported on torch backend — skip
 
         self._loaded = True
         logger.info(f"BatchedEngine loaded: {self._model_name}")

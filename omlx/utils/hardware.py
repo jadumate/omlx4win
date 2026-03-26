@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-# Adapted from vllm-mlx (https://github.com/vllm-project/vllm-mlx).
 """
-Unified hardware detection for Apple Silicon.
+Unified hardware detection for Windows (torch backend).
 
 Single source of truth for:
-- Chip identification (M1, M2, M3, M4 series)
+- CPU identification
 - Memory detection (total, available, max working set)
-- MLX availability checks
+- Torch/CUDA availability checks
 """
 
 from __future__ import annotations
@@ -15,17 +14,9 @@ import hashlib
 import logging
 import platform
 import re
-import subprocess
-import sys
+import uuid
 from dataclasses import dataclass
 from typing import Optional
-
-try:
-    import mlx.core as mx
-
-    HAS_MLX = True
-except ImportError:
-    HAS_MLX = False
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +26,7 @@ DEFAULT_MEMORY_BYTES = 8 * 1024 * 1024 * 1024  # 8GB
 
 @dataclass
 class HardwareInfo:
-    """Hardware information for Apple Silicon."""
+    """Hardware information."""
 
     chip_name: str
     total_memory_gb: float
@@ -50,56 +41,33 @@ class HardwareInfo:
 
 def get_chip_name() -> str:
     """
-    Get Apple Silicon chip name via sysctl.
+    Get CPU name via platform.processor() on Windows or fallback.
 
     Returns:
-        Chip name (e.g., "Apple M4 Pro") or "Apple Silicon" as fallback.
+        CPU name (e.g., "Intel64 Family 6 Model 85") or "Unknown CPU" as fallback.
     """
     try:
-        result = subprocess.run(
-            ["sysctl", "-n", "machdep.cpu.brand_string"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return result.stdout.strip()
+        name = platform.processor()
+        if name:
+            return name
     except Exception:
-        return "Apple Silicon"
+        pass
+    return "Unknown CPU"
 
 
 def get_total_memory_bytes() -> int:
     """
-    Get total unified memory in bytes.
-
-    Fallback chain:
-    1. sysctl hw.memsize (most reliable)
-    2. mlx.metal.device_info()["memory_size"]
-    3. DEFAULT_MEMORY_BYTES (8GB)
+    Get total system memory in bytes via psutil.
 
     Returns:
         Total memory in bytes.
     """
-    # Primary: sysctl
     try:
-        result = subprocess.run(
-            ["sysctl", "-n", "hw.memsize"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return int(result.stdout.strip())
-    except Exception:
-        pass
+        import psutil
 
-    # Fallback: MLX Metal
-    if HAS_MLX:
-        try:
-            if mx.metal.is_available():
-                device_info = mx.device_info()
-                if "memory_size" in device_info:
-                    return int(device_info["memory_size"])
-        except Exception:
-            pass
+        return psutil.virtual_memory().total
+    except ImportError:
+        pass
 
     # Last resort: default
     logger.warning(f"Using default memory size: {DEFAULT_MEMORY_BYTES // (1024**3)} GB")
@@ -107,34 +75,17 @@ def get_total_memory_bytes() -> int:
 
 
 def get_total_memory_gb() -> float:
-    """Get total unified memory in GB."""
+    """Get total system memory in GB."""
     return get_total_memory_bytes() / (1024**3)
 
 
 def get_max_working_set_bytes() -> int:
     """
-    Get max_recommended_working_set_size from MLX Metal.
-
-    Fallback chain:
-    1. mlx.metal.device_info()["max_recommended_working_set_size"]
-    2. psutil.virtual_memory().total * 0.75
-    3. DEFAULT_MEMORY_BYTES (8GB)
+    Get maximum recommended working set size (75% of total RAM).
 
     Returns:
         Maximum working set size in bytes.
     """
-    # Primary: MLX Metal
-    if HAS_MLX:
-        try:
-            if mx.metal.is_available():
-                device_info = mx.device_info()
-                max_working_set = device_info.get("max_recommended_working_set_size", 0)
-                if max_working_set > 0:
-                    return max_working_set
-        except Exception:
-            pass
-
-    # Fallback: psutil with 75% heuristic
     try:
         import psutil
 
@@ -151,20 +102,13 @@ def get_max_working_set_bytes() -> int:
 
 
 def get_mlx_device_name() -> Optional[str]:
-    """Get raw device name from MLX Metal API."""
-    if HAS_MLX:
-        try:
-            if mx.metal.is_available():
-                device_info = mx.device_info()
-                return device_info.get("device_name")
-        except Exception:
-            pass
+    """Get device name — returns None on Windows (no MLX)."""
     return None
 
 
 def detect_hardware() -> HardwareInfo:
     """
-    Detect Apple Silicon hardware and return complete info.
+    Detect hardware and return complete info.
 
     Returns:
         HardwareInfo with all hardware specifications.
@@ -178,28 +122,18 @@ def detect_hardware() -> HardwareInfo:
 
 
 # =============================================================================
-# MLX Availability Checks
+# MLX Availability Checks (always False on Windows)
 # =============================================================================
 
 
 def is_apple_silicon() -> bool:
-    """Check if running on Apple Silicon (arm64 macOS)."""
-    return sys.platform == "darwin" and platform.machine() == "arm64"
+    """Check if running on Apple Silicon — always False on Windows."""
+    return False
 
 
 def is_mlx_available() -> bool:
-    """Check if MLX is available and working."""
-    if not is_apple_silicon():
-        return False
-    if not HAS_MLX:
-        return False
-
-    try:
-        # Verify we can actually use MLX
-        _ = mx.array([1.0, 2.0, 3.0])
-        return True
-    except Exception:
-        return False
+    """Check if MLX is available — always False on Windows."""
+    return False
 
 
 # =============================================================================
@@ -208,33 +142,18 @@ def is_mlx_available() -> bool:
 
 
 def get_mlx_version() -> str:
-    """Get MLX version string."""
-    try:
-        import mlx
-
-        return getattr(mlx, "__version__", "Unknown")
-    except Exception:
-        return "Unknown"
+    """Get MLX version string — N/A on Windows."""
+    return "N/A"
 
 
 def get_mlx_lm_version() -> str:
-    """Get mlx-lm version string."""
-    try:
-        import mlx_lm
-
-        return getattr(mlx_lm, "__version__", "Unknown")
-    except Exception:
-        return "Unknown"
+    """Get mlx-lm version string — N/A on Windows."""
+    return "N/A"
 
 
 def get_mlx_vlm_version() -> str:
-    """Get mlx-vlm version string."""
-    try:
-        import mlx_vlm
-
-        return getattr(mlx_vlm, "__version__", "Unknown")
-    except Exception:
-        return "Unknown"
+    """Get mlx-vlm version string — N/A on Windows."""
+    return "N/A"
 
 
 # =============================================================================
@@ -245,48 +164,33 @@ _OWNER_HASH_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
 
 
 def get_gpu_core_count() -> Optional[int]:
-    """Get GPU core count via system_profiler."""
+    """Get CUDA device count via torch."""
     try:
-        result = subprocess.run(
-            ["system_profiler", "SPDisplaysDataType"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        for line in result.stdout.splitlines():
-            if "Total Number of Cores" in line:
-                match = re.search(r"(\d+)", line)
-                if match:
-                    return int(match.group(1))
+        import torch
+
+        count = torch.cuda.device_count()
+        return count if count > 0 else None
     except Exception:
         pass
     return None
 
 
 def get_io_platform_uuid() -> Optional[str]:
-    """Get IOPlatformUUID from ioreg (unique per device)."""
+    """Get a unique machine identifier via uuid.getnode()."""
     try:
-        result = subprocess.run(
-            ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        for line in result.stdout.splitlines():
-            if "IOPlatformUUID" in line:
-                match = re.search(r'"IOPlatformUUID"\s*=\s*"([^"]+)"', line)
-                if match:
-                    return match.group(1)
+        node = uuid.getnode()
+        # Format as UUID-like hex string
+        return format(node, "012x")
     except Exception:
         pass
     return None
 
 
 def parse_chip_info(chip_string: str) -> tuple[str, str]:
-    """Parse chip name and variant from sysctl brand string.
+    """Parse chip name and variant from brand string.
 
     Args:
-        chip_string: e.g. "Apple M4 Pro", "Apple M3 Max", "Apple M2"
+        chip_string: e.g. "Apple M4 Pro", "Intel Core i9", "AMD Ryzen 9"
 
     Returns:
         (chip_name, chip_variant) e.g. ("M4", "Pro"), ("M3", "Max"), ("M2", "")
@@ -318,14 +222,14 @@ def compute_owner_hash(
 
 
 def get_os_version() -> str:
-    """Get macOS version string (e.g. 'macOS 15.2')."""
+    """Get OS version string."""
     try:
-        mac_ver = platform.mac_ver()[0]
-        if mac_ver:
-            return f"macOS {mac_ver}"
+        ver = platform.version()
+        if ver:
+            return ver
     except Exception:
         pass
-    return "macOS"
+    return "Windows"
 
 
 # =============================================================================

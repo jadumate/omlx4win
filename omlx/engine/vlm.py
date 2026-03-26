@@ -29,8 +29,6 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any, Dict, List, Optional, Tuple
 
-import mlx.core as mx
-
 from ..api.tool_calling import convert_tools_for_template
 from ..api.utils import clean_special_tokens, detect_and_strip_partial
 from ..models.vlm import VLMModelAdapter
@@ -209,25 +207,33 @@ class VLMBatchedEngine(BaseEngine):
         return ids
 
     async def start(self) -> None:
-        """Load VLM model and processor via mlx-vlm, create engine with VLMModelAdapter."""
+        """Load VLM model and processor via transformers, create engine with VLMModelAdapter."""
         if self._loaded:
             return
 
-        from mlx_vlm.utils import load as vlm_load
-
         from ..engine_core import AsyncEngineCore, EngineConfig
         from ..scheduler import SchedulerConfig
-
-        # Load VLM model on the global MLX executor to avoid blocking the event loop
-        # while ensuring no concurrent Metal operations. See issue #85.
-        from ..engine_core import get_mlx_executor
+        from ..engine_core import get_torch_executor as get_mlx_executor
 
         def _load_vlm_sync():
             # Patch transformers bug: video_processor_class_from_name crashes
             # when torchvision is not available (extractors is None, `in` fails).
             # oMLX does not support video input, so we skip video processing.
             _patch_video_processor_bug()
-            return vlm_load(self._model_name)
+            import torch
+            from transformers import AutoProcessor, AutoModelForVision2Seq
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            processor = AutoProcessor.from_pretrained(self._model_name, trust_remote_code=True)
+            model = AutoModelForVision2Seq.from_pretrained(
+                self._model_name,
+                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                trust_remote_code=True,
+                device_map="auto" if device == "cuda" else None,
+            )
+            if device == "cpu":
+                model = model.to(device)
+            model.eval()
+            return model, processor
 
         loop = asyncio.get_running_loop()
         self._vlm_model, self._processor = await loop.run_in_executor(
@@ -276,24 +282,7 @@ class VLMBatchedEngine(BaseEngine):
                 self._engine.engine.scheduler._turboquant_kv_bits = tq_bits
                 logger.info(f"TurboQuant KV cache enabled for VLM: {tq_bits} bits")
 
-        # SpecPrefill: load draft model and pass to scheduler
-        if self._model_settings is not None:
-            specprefill_draft = getattr(self._model_settings, "specprefill_draft_model", None)
-            specprefill_enabled = getattr(self._model_settings, "specprefill_enabled", False)
-            if specprefill_enabled and specprefill_draft:
-                try:
-                    from mlx_lm import load as mlx_lm_load
-
-                    def _load_draft():
-                        draft_model, _ = mlx_lm_load(specprefill_draft)
-                        return draft_model
-                    draft_model = await loop.run_in_executor(get_mlx_executor(), _load_draft)
-                    self._engine.engine.scheduler.set_specprefill_draft_model(
-                        draft_model, draft_model_name=specprefill_draft
-                    )
-                    logger.info(f"SpecPrefill: draft model loaded ({specprefill_draft})")
-                except Exception as e:
-                    logger.error(f"SpecPrefill: draft model load failed: {e}")
+        # SpecPrefill: not supported on torch backend — skip
 
         # Inject mlx-lm tool calling support into VLM tokenizer
         self._inject_tool_calling(self._tokenizer)
@@ -315,57 +304,8 @@ class VLMBatchedEngine(BaseEngine):
         logger.info("VLMBatchedEngine stopped")
 
     def _inject_tool_calling(self, tokenizer) -> None:
-        """Inject mlx-lm's tool calling attributes into VLM tokenizer.
-
-        mlx-vlm's TokenizerWrapper lacks tool calling support (has_tool_calling,
-        tool_parser, etc). We reuse mlx-lm's _infer_tool_parser() to detect the
-        parser type from the chat template, then set the attributes directly on
-        the wrapper instance so parse_tool_calls() can use native tool parsing.
-        """
-        try:
-            from mlx_lm.tokenizer_utils import _infer_tool_parser
-        except ImportError:
-            return
-
-        chat_template = getattr(tokenizer, "chat_template", None)
-        if not chat_template:
-            return
-
-        tool_parser_type = _infer_tool_parser(chat_template)
-        if tool_parser_type is None:
-            return
-
-        try:
-            import importlib
-
-            tool_module = importlib.import_module(
-                f"mlx_lm.tool_parsers.{tool_parser_type}"
-            )
-        except ImportError:
-            logger.warning(
-                f"VLM tool parser module not found: {tool_parser_type}"
-            )
-            return
-
-        tool_call_start = tool_module.tool_call_start
-        tool_call_end = tool_module.tool_call_end
-
-        # Validate tokens exist in vocab (same check as mlx-lm)
-        vocab = tokenizer.get_vocab()
-        if (tool_call_start and tool_call_start not in vocab) or (
-            tool_call_end and tool_call_end not in vocab
-        ):
-            return
-
-        # Set instance attributes on the mlx-vlm TokenizerWrapper.
-        # Python's __getattr__ is only called when normal lookup fails,
-        # so instance attributes take precedence over delegation to HF tokenizer.
-        tokenizer.has_tool_calling = True
-        tokenizer.tool_call_start = tool_call_start
-        tokenizer.tool_call_end = tool_call_end
-        tokenizer.tool_parser = tool_module.parse_tool_call
-
-        logger.info(f"VLM tool calling enabled: parser={tool_parser_type}")
+        """Inject tool calling attributes into VLM tokenizer (no-op on torch backend)."""
+        pass
 
     @staticmethod
     def _count_content_parts(content: Any, part_types: set[str]) -> int:
@@ -389,7 +329,11 @@ class VLMBatchedEngine(BaseEngine):
         num_images: int,
     ) -> list[dict[str, Any]]:
         """Format VLM messages with image tokens on image-bearing user turns."""
-        from mlx_vlm.prompt_utils import extract_text_from_content, get_message_json
+        try:
+            from mlx_vlm.prompt_utils import extract_text_from_content, get_message_json
+        except ImportError:
+            # On torch backend, return messages as-is
+            return messages
 
         model_type = self.model_type or getattr(self._vlm_model.config, "model_type", "")
         if not model_type:
@@ -449,13 +393,9 @@ class VLMBatchedEngine(BaseEngine):
         images: list[Any],
         chat_template_kwargs: dict[str, Any] | None = None,
         tools: list[dict] | None = None,
-    ) -> Tuple[List[int], Optional[mx.array], Optional[Dict[str, Any]], Optional[str]]:
+    ) -> Tuple[List[int], Optional[Any], Optional[Dict[str, Any]], Optional[str]]:
         """
-        Run the full VLM preprocessing pipeline:
-        1. Apply chat template with image placeholders
-        2. Tokenize and preprocess images via processor
-        3. Run vision encoder to produce merged embeddings
-        4. Compute image hash for prefix cache
+        Run the full VLM preprocessing pipeline using transformers.
 
         Args:
             messages: Chat messages (text-only, images already extracted)
@@ -463,13 +403,12 @@ class VLMBatchedEngine(BaseEngine):
 
         Returns:
             Tuple of (token_ids, inputs_embeds, extra_kwargs, image_hash):
-            - token_ids: List of token IDs for BatchGenerator
+            - token_ids: List of token IDs
             - inputs_embeds: Merged vision+text embeddings (or None if text-only)
             - extra_kwargs: Model-specific kwargs for language model
             - image_hash: SHA256 hash of images for prefix cache
         """
-        from mlx_vlm.prompt_utils import apply_chat_template
-        from mlx_vlm.utils import prepare_inputs
+        import torch
 
         num_images = len(images)
         model_type = self.model_type or ""
@@ -481,107 +420,55 @@ class VLMBatchedEngine(BaseEngine):
                 f"Please use only 1 image."
             )
 
-        # Apply VLM-specific chat template with image placeholders.
-        # Build per-message placeholders in oMLX so image-bearing turns always
-        # receive image tokens, regardless of conversation history shape.
-        try:
-            formatted_messages = self._format_messages_for_vlm_template(
-                messages, num_images=num_images
-            )
-        except Exception as e:
-            logger.debug(
-                "Falling back to mlx-vlm apply_chat_template for VLM formatting: %s",
-                e,
-            )
-            # Fallback to upstream formatter for unknown model/format edge cases.
-            formatted_messages = apply_chat_template(
-                self._processor,
-                self._vlm_model.config,
-                messages,
-                num_images=num_images,
-                return_messages=True,
-            )
-
-        # Strip partial field from messages (VLM always uses add_generation_prompt=True)
-        detect_and_strip_partial(formatted_messages)
+        detect_and_strip_partial(messages)
         template_kwargs = {
             "tokenize": False,
             "add_generation_prompt": True,
         }
         if self._enable_thinking is not None:
             template_kwargs["enable_thinking"] = self._enable_thinking
-        # Per-model/request kwargs override global defaults (e.g. enable_thinking,
-        # reasoning_effort).  This mirrors the text-only _apply_chat_template().
         if tools:
             template_kwargs["tools"] = tools
         if chat_template_kwargs:
             template_kwargs.update(chat_template_kwargs)
 
-        # Use processor or its tokenizer for chat template application
         template_target = self._processor
         if not hasattr(template_target, "apply_chat_template"):
             template_target = getattr(self._processor, "tokenizer", self._processor)
         try:
-            prompt = template_target.apply_chat_template(
-                formatted_messages, **template_kwargs
-            )
+            prompt = template_target.apply_chat_template(messages, **template_kwargs)
         except TypeError:
-            # Fallback: template doesn't support some kwargs
             if chat_template_kwargs:
                 for key in chat_template_kwargs:
                     template_kwargs.pop(key, None)
             template_kwargs.pop("enable_thinking", None)
-            prompt = template_target.apply_chat_template(
-                formatted_messages, **template_kwargs
-            )
+            prompt = template_target.apply_chat_template(messages, **template_kwargs)
 
-        # Tokenize text and preprocess images
-        inputs = prepare_inputs(
-            self._processor,
-            images=images if images else None,
-            prompts=[prompt] if isinstance(prompt, str) else prompt,
-        )
+        if images and num_images > 0:
+            try:
+                device = next(self._vlm_model.parameters()).device
+            except Exception:
+                device = "cpu"
+            inputs = self._processor(
+                text=prompt,
+                images=images,
+                return_tensors="pt",
+            ).to(device)
 
-        input_ids = inputs["input_ids"]
-        pixel_values = inputs.get("pixel_values")
-        attention_mask = inputs.get("attention_mask")
+            with torch.no_grad():
+                embed_features = self._vlm_model.get_input_embeddings(**inputs)
 
-        # Extract additional model-specific inputs (filter None values
-        # since prepare_inputs may include them after mlx-vlm 348466f)
-        extra_model_inputs = {
-            k: v
-            for k, v in inputs.items()
-            if k not in ("input_ids", "attention_mask", "pixel_values")
-            and v is not None
-        }
+            input_ids = inputs.get("input_ids", None)
+            if input_ids is not None:
+                token_ids = input_ids[0].tolist()
+            else:
+                token_ids = self._tokenizer.encode(prompt)
 
-        if pixel_values is not None and num_images > 0:
-            # Run vision encoder + embedding merge.
-            # Pass attention_mask as 'mask' — mlx-vlm models (e.g. Gemma 3)
-            # expect it as a positional/keyword arg named 'mask'.
-            embed_features = self._vlm_model.get_input_embeddings(
-                input_ids, pixel_values, mask=attention_mask, **extra_model_inputs
-            )
-            mx.eval(embed_features.inputs_embeds)
-
-            # Convert InputEmbeddingsFeatures to dict for extra kwargs
-            extra_kwargs = {}
-            if hasattr(embed_features, "to_dict"):
-                feat_dict = embed_features.to_dict()
-                for k, v in feat_dict.items():
-                    if k != "inputs_embeds" and v is not None:
-                        extra_kwargs[k] = v
-
-            # Extract token IDs as list
-            token_ids = input_ids[0].tolist() if input_ids.ndim > 1 else input_ids.tolist()
-
-            # Compute image hash for prefix cache
             image_hash = compute_image_hash(images)
-
-            return token_ids, embed_features.inputs_embeds, extra_kwargs, image_hash
+            inputs_embeds = getattr(embed_features, "inputs_embeds", None)
+            return token_ids, inputs_embeds, {}, image_hash
         else:
-            # Text-only (no images in this message)
-            token_ids = input_ids[0].tolist() if input_ids.ndim > 1 else input_ids.tolist()
+            token_ids = self._tokenizer.encode(prompt)
             return token_ids, None, None, None
 
     def _apply_chat_template(

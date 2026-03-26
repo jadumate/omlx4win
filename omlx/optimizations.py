@@ -22,7 +22,12 @@ Usage:
 
 import logging
 
-import mlx.core as mx
+try:
+    import mlx.core as mx
+    HAS_MLX = True
+except ImportError:
+    mx = None
+    HAS_MLX = False
 
 # Re-export from hardware module for backward compatibility
 from omlx.utils.hardware import (

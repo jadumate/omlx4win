@@ -1,24 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""
-MLX Language Model wrapper.
-
-This module provides a wrapper around mlx-lm for LLM inference,
-integrating with vLLM's model execution system.
-"""
+"""Torch Language Model wrapper using transformers."""
 
 import logging
+import threading
 from dataclasses import dataclass
-from typing import Iterator
-
-from ..api.utils import detect_and_strip_partial
-from ..utils.tokenizer import get_tokenizer_config
+from typing import Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class GenerationOutput:
-    """Output from text generation."""
     text: str
     tokens: list[int]
     finish_reason: str | None = None
@@ -26,314 +18,172 @@ class GenerationOutput:
 
 @dataclass
 class StreamingOutput:
-    """Streaming output chunk."""
     text: str
     token: int
     finished: bool = False
     finish_reason: str | None = None
 
 
-class MLXLanguageModel:
-    """
-    Wrapper around mlx-lm for LLM inference.
+class TorchLanguageModel:
+    """Wrapper around transformers for LLM inference."""
 
-    This class provides a unified interface for loading and running
-    inference on language models using Apple's MLX framework.
-
-    Example:
-        >>> model = MLXLanguageModel("mlx-community/Llama-3.2-3B-Instruct-4bit")
-        >>> output = model.generate("Hello, how are you?", max_tokens=100)
-        >>> print(output.text)
-    """
-
-    def __init__(
-        self,
-        model_name: str,
-        tokenizer_name: str | None = None,
-        trust_remote_code: bool = False,
-    ):
-        """
-        Initialize the MLX language model.
-
-        Args:
-            model_name: HuggingFace model name or local path
-            tokenizer_name: Optional separate tokenizer name
-            trust_remote_code: Whether to trust remote code
-        """
+    def __init__(self, model_name: str, tokenizer_name: str | None = None, trust_remote_code: bool = False):
         self.model_name = model_name
         self.tokenizer_name = tokenizer_name or model_name
         self.trust_remote_code = trust_remote_code
-
         self.model = None
         self.tokenizer = None
         self._loaded = False
+        self._device = None
 
     def load(self) -> None:
-        """Load the model and tokenizer."""
         if self._loaded:
             return
-
-        try:
-            from mlx_lm import load
-
-            logger.info(f"Loading model: {self.model_name}")
-
-            # Build tokenizer config with model-specific fixes
-            tokenizer_config = get_tokenizer_config(
-                self.model_name,
-                trust_remote_code=self.trust_remote_code,
-            )
-
-            self.model, self.tokenizer = load(
-                self.model_name,
-                tokenizer_config=tokenizer_config,
-            )
-
-            self._loaded = True
-            logger.info(f"Model loaded successfully: {self.model_name}")
-
-        except ImportError:
-            raise ImportError(
-                "mlx-lm is required for LLM inference. "
-                "Install with: pip install mlx-lm"
-            )
-        except Exception as e:
-            logger.error(f"Failed to load model: {e}")
-            raise
-
-    def _create_sampler(
-        self,
-        temperature: float = 0.7,
-        top_p: float = 0.9,
-    ):
-        """Create a sampler for text generation."""
-        from mlx_lm.sample_utils import make_sampler
-
-        return make_sampler(
-            temp=temperature,
-            top_p=top_p,
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        logger.info(f"Loading model: {self.model_name}")
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.tokenizer_name, trust_remote_code=self.trust_remote_code
         )
+        self._device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model = AutoModelForCausalLM.from_pretrained(
+            self.model_name,
+            trust_remote_code=self.trust_remote_code,
+            torch_dtype=torch.float16 if self._device == "cuda" else torch.float32,
+            device_map="auto" if self._device == "cuda" else None,
+        )
+        if self._device == "cpu":
+            self.model = self.model.to(self._device)
+        self.model.eval()
+        self._loaded = True
+        logger.info(f"Model loaded: {self.model_name}")
 
-    def generate(
-        self,
-        prompt: str,
-        max_tokens: int = 256,
-        temperature: float = 0.7,
-        top_p: float = 0.9,
-        repetition_penalty: float = 1.0,
-        stop: list[str] | None = None,
-    ) -> GenerationOutput:
-        """
-        Generate text from a prompt.
+    def _sample_token(self, logits, temperature: float, top_p: float, top_k: int):
+        import torch
+        if temperature == 0 or temperature < 1e-7:
+            return logits.argmax(dim=-1).item()
+        logits = logits / temperature
+        if top_k > 0:
+            top_k_vals, _ = torch.topk(logits, top_k)
+            logits[logits < top_k_vals[..., -1:]] = float("-inf")
+        if top_p < 1.0:
+            sorted_logits, sorted_idx = torch.sort(logits, descending=True)
+            cumprobs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+            sorted_logits[cumprobs - torch.softmax(sorted_logits, dim=-1) > top_p] = float("-inf")
+            logits = sorted_logits.scatter(-1, sorted_idx, sorted_logits)
+        probs = torch.softmax(logits, dim=-1)
+        return torch.multinomial(probs, num_samples=1).item()
 
-        Args:
-            prompt: Input prompt text
-            max_tokens: Maximum number of tokens to generate
-            temperature: Sampling temperature (0 = greedy)
-            top_p: Top-p (nucleus) sampling parameter
-            repetition_penalty: Penalty for repeating tokens
-            stop: List of stop sequences
-
-        Returns:
-            GenerationOutput with generated text and tokens
-        """
+    def generate(self, prompt: str, max_tokens: int = 256, temperature: float = 0.7,
+                  top_p: float = 0.9, top_k: int = 0, stop: list[str] | None = None, **kwargs) -> GenerationOutput:
         if not self._loaded:
             self.load()
-
-        from mlx_lm import generate
-
-        # Create sampler with parameters
-        sampler = self._create_sampler(temperature, top_p)
-
-        # Generate text
-        output_text = generate(
-            self.model,
-            self.tokenizer,
-            prompt=prompt,
-            max_tokens=max_tokens,
-            sampler=sampler,
-            verbose=False,
-        )
-
-        # Tokenize output to get token IDs
-        tokens = self.tokenizer.encode(output_text)
-
-        # Determine finish reason
-        finish_reason = "length" if len(tokens) >= max_tokens else "stop"
-
-        return GenerationOutput(
-            text=output_text,
-            tokens=tokens,
-            finish_reason=finish_reason,
-        )
-
-    def stream_generate(
-        self,
-        prompt: str,
-        max_tokens: int = 256,
-        temperature: float = 0.7,
-        top_p: float = 0.9,
-        repetition_penalty: float = 1.0,
-        stop: list[str] | None = None,
-    ) -> Iterator[StreamingOutput]:
-        """
-        Stream text generation token by token.
-
-        Args:
-            prompt: Input prompt text
-            max_tokens: Maximum number of tokens to generate
-            temperature: Sampling temperature (0 = greedy)
-            top_p: Top-p (nucleus) sampling parameter
-            repetition_penalty: Penalty for repeating tokens
-            stop: List of stop sequences
-
-        Yields:
-            StreamingOutput for each generated token
-        """
-        if not self._loaded:
-            self.load()
-
-        from mlx_lm import stream_generate
-
-        # Create sampler with parameters
-        sampler = self._create_sampler(temperature, top_p)
-
-        token_count = 0
+        import torch
+        input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self._device)
+        generated_ids = []
+        past_key_values = None
         accumulated_text = ""
-
-        for response in stream_generate(
-            self.model,
-            self.tokenizer,
-            prompt=prompt,
-            max_tokens=max_tokens,
-            sampler=sampler,
-        ):
-            token_count += 1
-            # response.text is the new token text (not accumulated)
-            new_text = response.text
-            accumulated_text += new_text
-
-            # Check for stop sequences
-            should_stop = False
-            if stop:
-                for stop_seq in stop:
-                    if stop_seq in accumulated_text:
-                        should_stop = True
+        finish_reason = "length"
+        eos_id = self.tokenizer.eos_token_id
+        with torch.no_grad():
+            attn_mask = torch.ones_like(input_ids)
+            for _ in range(max_tokens):
+                out = self.model(input_ids=input_ids if past_key_values is None else input_ids[:, -1:],
+                                  attention_mask=attn_mask, past_key_values=past_key_values, use_cache=True)
+                past_key_values = out.past_key_values
+                token_id = self._sample_token(out.logits[0, -1], temperature, top_p, top_k)
+                if past_key_values is not None:
+                    attn_mask = torch.cat([attn_mask, torch.ones((1, 1), device=self._device)], dim=1)
+                input_ids = torch.tensor([[token_id]], device=self._device)
+                generated_ids.append(token_id)
+                new_text = self.tokenizer.decode([token_id], skip_special_tokens=True)
+                accumulated_text += new_text
+                if token_id == eos_id:
+                    finish_reason = "stop"
+                    break
+                if stop:
+                    for seq in stop:
+                        if seq in accumulated_text:
+                            finish_reason = "stop"
+                            break
+                    if finish_reason == "stop":
                         break
+        return GenerationOutput(text=accumulated_text, tokens=generated_ids, finish_reason=finish_reason)
 
-            finished = should_stop or token_count >= max_tokens
-            finish_reason = None
-            if finished:
-                finish_reason = "stop" if should_stop else "length"
-
-            yield StreamingOutput(
-                text=new_text,
-                token=response.token if hasattr(response, 'token') else 0,
-                finished=finished,
-                finish_reason=finish_reason,
-            )
-
-            if finished:
-                break
-
-    def chat(
-        self,
-        messages: list[dict],
-        max_tokens: int = 256,
-        temperature: float = 0.7,
-        top_p: float = 0.9,
-        tools: list | None = None,
-        enable_thinking: bool | None = None,
-        **kwargs,
-    ) -> GenerationOutput:
-        """
-        Generate a chat response.
-
-        Args:
-            messages: List of chat messages [{"role": "user", "content": "..."}]
-            max_tokens: Maximum tokens to generate
-            temperature: Sampling temperature
-            top_p: Top-p sampling parameter
-            tools: Optional list of tools for function calling
-            enable_thinking: Enable thinking mode for reasoning models (passed to chat_template_kwargs)
-            **kwargs: Additional generation parameters
-
-        Returns:
-            GenerationOutput with the assistant's response
-        """
+    def stream_generate(self, prompt: str, max_tokens: int = 256, temperature: float = 0.7,
+                         top_p: float = 0.9, top_k: int = 0, stop: list[str] | None = None, **kwargs) -> Iterator[StreamingOutput]:
         if not self._loaded:
             self.load()
+        import torch
+        input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self._device)
+        past_key_values = None
+        accumulated_text = ""
+        eos_id = self.tokenizer.eos_token_id
+        attn_mask = torch.ones_like(input_ids)
+        with torch.no_grad():
+            for step in range(max_tokens):
+                out = self.model(input_ids=input_ids if past_key_values is None else input_ids[:, -1:],
+                                  attention_mask=attn_mask, past_key_values=past_key_values, use_cache=True)
+                past_key_values = out.past_key_values
+                if past_key_values is not None:
+                    attn_mask = torch.cat([attn_mask, torch.ones((1, 1), device=self._device)], dim=1)
+                token_id = self._sample_token(out.logits[0, -1], temperature, top_p, top_k)
+                input_ids = torch.tensor([[token_id]], device=self._device)
+                new_text = self.tokenizer.decode([token_id], skip_special_tokens=False)
+                accumulated_text += new_text
+                is_eos = token_id == eos_id
+                should_stop = is_eos
+                if stop and not should_stop:
+                    for seq in stop:
+                        if seq in accumulated_text:
+                            should_stop = True
+                            break
+                finished = should_stop or (step + 1 >= max_tokens)
+                finish_reason = None
+                if finished:
+                    finish_reason = "stop" if should_stop else "length"
+                yield StreamingOutput(text=new_text, token=token_id, finished=finished, finish_reason=finish_reason)
+                if finished:
+                    break
 
-        # Apply chat template
-        if hasattr(self.tokenizer, 'apply_chat_template'):
-            is_partial = detect_and_strip_partial(messages)
-            # Build kwargs for apply_chat_template
-            template_kwargs = {
-                "tokenize": False,
-                "add_generation_prompt": not is_partial,
-            }
-            if is_partial:
-                template_kwargs["continue_final_message"] = True
-
-            # Add tools if provided and supported
-            if tools:
-                template_kwargs["tools"] = tools
-
-            # Add enable_thinking if specified
-            if enable_thinking is not None:
-                template_kwargs["enable_thinking"] = enable_thinking
-
+    def chat(self, messages: list[dict], max_tokens: int = 256, temperature: float = 0.7,
+              top_p: float = 0.9, tools: list | None = None, enable_thinking: bool | None = None, **kwargs) -> GenerationOutput:
+        if not self._loaded:
+            self.load()
+        from ..api.utils import detect_and_strip_partial
+        is_partial = detect_and_strip_partial(messages)
+        template_kwargs = {"tokenize": False, "add_generation_prompt": not is_partial}
+        if is_partial:
+            template_kwargs["continue_final_message"] = True
+        if tools:
+            template_kwargs["tools"] = tools
+        if enable_thinking is not None:
+            template_kwargs["enable_thinking"] = enable_thinking
+        try:
+            prompt = self.tokenizer.apply_chat_template(messages, **template_kwargs)
+        except TypeError:
+            template_kwargs.pop("tools", None)
+            template_kwargs.pop("enable_thinking", None)
             try:
-                prompt = self.tokenizer.apply_chat_template(
-                    messages,
-                    **template_kwargs,
-                )
-            except TypeError:
-                # Tokenizer doesn't support some parameter, try without tools and enable_thinking
-                template_kwargs.pop("tools", None)
-                template_kwargs.pop("enable_thinking", None)
-                prompt = self.tokenizer.apply_chat_template(
-                    messages,
-                    **template_kwargs,
-                )
-        else:
-            # Fallback: simple concatenation
-            prompt = "\n".join(
-                f"{msg['role']}: {msg['content']}" for msg in messages
-            )
-            prompt += "\nassistant:"
-
-        return self.generate(
-            prompt=prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            **kwargs,
-        )
+                prompt = self.tokenizer.apply_chat_template(messages, **template_kwargs)
+            except Exception:
+                prompt = "\n".join(f"{m['role']}: {m['content']}" for m in messages) + "\nassistant:"
+        return self.generate(prompt=prompt, max_tokens=max_tokens, temperature=temperature, top_p=top_p, **kwargs)
 
     def get_model_info(self) -> dict:
-        """Get information about the loaded model."""
         if not self._loaded:
             return {"loaded": False, "model_name": self.model_name}
-
-        info = {
-            "loaded": True,
-            "model_name": self.model_name,
-            "tokenizer_name": self.tokenizer_name,
-        }
-
-        # Try to get model config
-        if hasattr(self.model, 'config'):
-            config = self.model.config
-            info.update({
-                "vocab_size": getattr(config, 'vocab_size', None),
-                "hidden_size": getattr(config, 'hidden_size', None),
-                "num_layers": getattr(config, 'num_hidden_layers', None),
-                "num_heads": getattr(config, 'num_attention_heads', None),
-            })
-
+        info = {"loaded": True, "model_name": self.model_name}
+        if hasattr(self.model, "config"):
+            cfg = self.model.config
+            info.update({"vocab_size": getattr(cfg, "vocab_size", None),
+                          "hidden_size": getattr(cfg, "hidden_size", None),
+                          "num_layers": getattr(cfg, "num_hidden_layers", None)})
         return info
 
-    def __repr__(self) -> str:
-        status = "loaded" if self._loaded else "not loaded"
-        return f"<MLXLanguageModel model={self.model_name} status={status}>"
+    def __repr__(self):
+        return f"<TorchLanguageModel model={self.model_name} loaded={self._loaded}>"
+
+
+# Backward compatibility alias
+MLXLanguageModel = TorchLanguageModel

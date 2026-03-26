@@ -25,14 +25,8 @@ from omlx.utils.hardware import get_max_working_set_bytes, format_bytes
 
 logger = logging.getLogger(__name__)
 
-# Check if MLX Metal is available
-try:
-    import mlx.core as mx
-
-    HAS_MLX_METAL = mx.metal.is_available()
-except ImportError:
-    HAS_MLX_METAL = False
-    mx = None
+# MLX Metal is not available on Windows (torch backend)
+HAS_MLX_METAL = False
 
 
 @dataclass
@@ -154,18 +148,15 @@ class MemoryMonitor:
         This allows accurate detection of memory pressure from KV cache growth
         while ignoring static model memory.
         """
-        if HAS_MLX_METAL:
-            try:
-                self._baseline_memory = mx.get_active_memory()
-                logger.info(
-                    f"Baseline memory set: {format_bytes(self._baseline_memory)}"
-                )
-            except Exception as e:
-                logger.warning(f"Failed to set baseline memory: {e}")
-                self._baseline_memory = 0
-        else:
+        try:
+            import psutil
+            self._baseline_memory = psutil.Process().memory_info().rss
+            logger.info(
+                f"Baseline memory set: {format_bytes(self._baseline_memory)}"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to set baseline memory: {e}")
             self._baseline_memory = 0
-            logger.warning("MLX Metal not available, baseline memory set to 0")
 
     def set_request_stats(self, running: int, waiting: int) -> None:
         """

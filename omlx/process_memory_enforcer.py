@@ -17,8 +17,6 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
-import mlx.core as mx
-
 if TYPE_CHECKING:
     from .engine_pool import EnginePool
     from .model_settings import ModelSettingsManager
@@ -128,28 +126,14 @@ class ProcessMemoryEnforcer:
         hard_limit = self._get_hard_limit_bytes()
         if hard_limit <= 0:
             return
-        try:
-            self._prev_memory_limit = mx.set_memory_limit(hard_limit)
-            self._prev_cache_limit = mx.set_cache_limit(hard_limit // 2)
-            logger.info(
-                f"Metal memory limit set: {_format_gb(hard_limit)}, "
-                f"cache limit: {_format_gb(hard_limit // 2)}"
-            )
-        except Exception as e:
-            logger.debug(f"Failed to set Metal memory limit: {e}")
+        # No Metal memory limit on torch backend
+        logger.debug("Memory limit setting skipped (torch backend)")
 
     def _clear_metal_memory_limit(self) -> None:
-        """Restore Metal-level memory limits to their previous values."""
-        try:
-            if self._prev_memory_limit is not None:
-                mx.set_memory_limit(self._prev_memory_limit)
-            if self._prev_cache_limit is not None:
-                mx.set_cache_limit(self._prev_cache_limit)
-            self._prev_memory_limit = None
-            self._prev_cache_limit = None
-            logger.info("Metal memory limit cleared (guard disabled)")
-        except Exception as e:
-            logger.debug(f"Failed to clear Metal memory limit: {e}")
+        """Restore memory limits — no-op on torch backend."""
+        self._prev_memory_limit = None
+        self._prev_cache_limit = None
+        logger.debug("Memory limit clear skipped (torch backend)")
 
     @property
     def prefill_memory_guard(self) -> bool:
@@ -227,7 +211,11 @@ class ProcessMemoryEnforcer:
         if self._max_bytes <= 0:
             return
 
-        current = mx.get_active_memory()
+        try:
+            import psutil
+            current = psutil.Process().memory_info().rss
+        except Exception:
+            current = 0
         if current <= self._max_bytes:
             return
 
@@ -238,11 +226,16 @@ class ProcessMemoryEnforcer:
             f"(over by {_format_gb(overage)})"
         )
 
+        def _get_active_memory():
+            try:
+                import psutil
+                return psutil.Process().memory_info().rss
+            except Exception:
+                return 0
+
         # Acquire EnginePool lock and unload LRU models until under limit.
-        # Note: prefill loops self-check via _memory_limit_bytes (same thread,
-        # no GIL issue), so they will abort independently of this enforcer.
         async with self._engine_pool._lock:
-            while mx.get_active_memory() > self._max_bytes:
+            while _get_active_memory() > self._max_bytes:
                 victim = self._engine_pool._find_lru_victim()
                 if victim is not None:
                     # Count loaded non-pinned models
@@ -322,7 +315,14 @@ class ProcessMemoryEnforcer:
 
     def get_status(self) -> dict:
         """Get enforcer status for monitoring endpoints."""
-        current = mx.get_active_memory() if self._running else 0
+        if self._running:
+            try:
+                import psutil
+                current = psutil.Process().memory_info().rss
+            except Exception:
+                current = 0
+        else:
+            current = 0
         return {
             "enabled": self._running,
             "max_bytes": self._max_bytes,

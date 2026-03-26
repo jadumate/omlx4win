@@ -13,10 +13,22 @@ def load_text_model(
     model_name: str,
     tokenizer_config: dict[str, Any] | None = None,
 ):
-    """Load an LLM model/tokenizer pair via mlx-lm."""
-    from mlx_lm import load
+    """Load an LLM model/tokenizer pair via transformers."""
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    import torch
 
-    return load(model_name, tokenizer_config=tokenizer_config)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, **(tokenizer_config or {}))
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+        device_map="auto" if device == "cuda" else None,
+        trust_remote_code=True,
+    )
+    if device == "cpu":
+        model = model.to(device)
+    model.eval()
+    return model, tokenizer
 
 
 def apply_post_load_transforms(model: Any, model_settings: Any = None) -> Any:
