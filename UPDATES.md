@@ -1,5 +1,56 @@
 # UPDATES
 
+## 2026-03-26 (3) — Weight quantization, TurboQuant KV, Web UI
+
+### New Features
+
+#### Weight Quantization (BitsAndBytes)
+Load models in 4-bit (NF4) or 8-bit (INT8) via BitsAndBytes to reduce VRAM usage.
+Configured per-model in the admin dashboard or via API.
+
+| Setting | VRAM reduction | Notes |
+|---------|---------------|-------|
+| `4bit` | ~75% vs fp16 | NF4 + double quant, compute in fp16 |
+| `8bit` | ~50% vs fp16 | LLM.int8() |
+
+| File | Change |
+|------|--------|
+| `omlx/utils/model_loading.py` | Added `quantization` parameter; builds `BitsAndBytesConfig` for 4-bit/8-bit on CUDA |
+| `omlx/engine/batched.py` | Reads `quantization` from model settings and passes to loader |
+| `omlx/engine/vlm.py` | Same BitsAndBytes support for VLM models |
+| `omlx/model_settings.py` | Added `quantization: Optional[str]` field |
+| `omlx/admin/routes.py` | Added `quantization` to `ModelSettingsRequest`; validates and persists; triggers model reload |
+
+#### TurboQuant KV Cache (PyTorch port)
+Codebook-based KV cache compression between decode steps. Reduces KV memory ~4x at 4-bit.
+Original used Apple Metal kernels; this port dequantizes on GPU before each forward pass.
+
+| File | Change |
+|------|--------|
+| `omlx/turboquant_kv.py` | Full rewrite: `TorchTurboQuantCodec` (Lloyd-Max codebook + random QR rotation), `TorchTurboQuantKVCache` (compress/decompress `past_key_values`). Supports 3-bit, 4-bit, 8-bit. Handles both legacy tuple-of-tuples and `DynamicCache` (transformers ≥ 4.36). |
+| `omlx/scheduler.py` | `_RequestState` now compresses KV after prefill/decode and decompresses before next decode when TurboQuant is enabled |
+
+#### Web UI — Models → Quantizer tab
+New "Weight Quantization" card lists all LLM/VLM models with per-model controls:
+- Quantization dropdown (fp16 / 4-bit NF4 / 8-bit INT8)
+- TurboQuant KV toggle + bits selector (3 / 4 / 8)
+- Apply button (saves settings + reloads model)
+
+| File | Change |
+|------|--------|
+| `omlx/admin/templates/dashboard/_models.html` | Added Weight Quantization card to Quantizer tab |
+| `omlx/admin/static/js/dashboard.js` | Added `wqSelected`, `wqTq`, `wqTqBits`, `wqSaving` state; `wqLlmModels()` filter; `applyWeightQuant()` API call |
+
+### Fixes
+
+| File | Fix |
+|------|-----|
+| `omlx/admin/static/js/dashboard.js` | Apply button was permanently grayed out — Alpine.js v3 proxy returns truthy wrapper for uninitialized keys; fixed by initializing `wqSaving[m.id] = false` in `loadModels()` and using `=== true` comparison in `:disabled` |
+| `omlx/turboquant_kv.py` | `_iter_kv` now uses `_safe_pairs()` for legacy tuple-of-tuples, extracting only `item[0], item[1]` — guards against models that store extra tensors per layer (caused "too many values to unpack") |
+| `omlx/scheduler.py` | Full traceback now logged on generation error (was only logging message string) |
+
+---
+
 ## 2026-03-26 (2) — Bug fixes
 
 ### Fixes
@@ -100,7 +151,7 @@ feature list, supported model types, CLI reference, and a comparison table vs. t
 
 ### Features Not Available in This Port
 
-- **TurboQuant KV** — Metal-specific fused attention quantization
+- **TurboQuant KV fused decode** — Metal kernel speedup not available; PyTorch port dequantizes on GPU instead (memory savings are identical)
 - **SpecPrefill** — MLX sparse prefill for MoE models
 - **oQ quantization** — MLX-native weight quantization tool
 - **Tiered KV cache (SSD cold tier)** — requires MLX array serialization
