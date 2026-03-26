@@ -249,6 +249,14 @@
             msModelDetail: null,
             msModelDetailLoading: false,
 
+            // Weight Quantization (BitsAndBytes) state
+            wqSelected: {},   // modelId → '4bit'|'8bit'|''
+            wqTq: {},         // modelId → bool (turboquant_kv_enabled)
+            wqTqBits: {},     // modelId → 3|4
+            wqSaving: {},     // modelId → bool
+            wqSuccess: '',
+            wqError: '',
+
             // oQ Quantizer state
             oqModels: [],
             oqAllModels: [],
@@ -770,6 +778,14 @@
                     if (response.ok) {
                         const data = await response.json();
                         this.models = data.models || [];
+                        // Initialise weight-quant state from current settings (don't overwrite in-progress edits)
+                        for (const m of this.models) {
+                            if (!(m.id in this.wqSelected)) {
+                                this.wqSelected[m.id] = m.settings?.quantization || '';
+                                this.wqTq[m.id] = m.settings?.turboquant_kv_enabled || false;
+                                this.wqTqBits[m.id] = m.settings?.turboquant_kv_bits || 4;
+                            }
+                        }
                     } else if (response.status === 401) {
                         window.location.href = '/admin';
                     }
@@ -979,6 +995,7 @@
                                     ? chatTemplateKwargs : null,
                                 forced_ct_kwargs: forcedCtKwargs.length > 0
                                     ? forcedCtKwargs : null,
+                                quantization: this.modelSettings.quantization || null,
                                 turboquant_kv_enabled: this.modelSettings.turboquant_kv_enabled,
                                 turboquant_kv_bits: this.modelSettings.turboquant_kv_enabled
                                     ? (this.modelSettings.turboquant_kv_bits || 4)
@@ -2645,6 +2662,47 @@
                 const dlGB = (task.downloaded_size / (1024 ** 3)).toFixed(1);
                 const totalGB = (task.total_size / (1024 ** 3)).toFixed(1);
                 return `${pct}% \u00b7 ${dlGB} GB / ${totalGB} GB`;
+            },
+
+            // =================================================================
+            // Weight Quantization (BitsAndBytes) Functions
+            // =================================================================
+
+            wqLlmModels() {
+                return this.models.filter(m => m.model_type === 'llm' || m.model_type === 'vlm');
+            },
+
+            async applyWeightQuant(modelId) {
+                this.wqSaving[modelId] = true;
+                this.wqSuccess = '';
+                this.wqError = '';
+                try {
+                    const resp = await fetch(`/admin/api/models/${encodeURIComponent(modelId)}/settings`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            quantization: this.wqSelected[modelId] || null,
+                            turboquant_kv_enabled: this.wqTq[modelId] || false,
+                            turboquant_kv_bits: this.wqTqBits[modelId] || 4,
+                        }),
+                    });
+                    if (resp.ok) {
+                        const data = await resp.json();
+                        const model = this.models.find(m => m.id === modelId);
+                        if (model) model.settings = data.settings || {};
+                        this.wqSuccess = `Saved. Reload the model to apply.`;
+                        setTimeout(() => { this.wqSuccess = ''; }, 4000);
+                    } else if (resp.status === 401) {
+                        window.location.href = '/admin';
+                    } else {
+                        const data = await resp.json();
+                        this.wqError = data.detail || 'Failed to save settings.';
+                    }
+                } catch (e) {
+                    this.wqError = 'Network error.';
+                } finally {
+                    this.wqSaving[modelId] = false;
+                }
             },
 
             // =================================================================
