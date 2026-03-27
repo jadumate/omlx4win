@@ -56,6 +56,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import Header
 
 from omlx._version import __version__
 
@@ -244,10 +245,13 @@ def get_mcp_manager():
 
 async def verify_api_key(
     credentials: HTTPAuthorizationCredentials = Depends(security),
+    x_api_key: str | None = Header(default=None, alias="x-api-key"),
 ) -> bool:
     """Verify API key if configured.
 
-    Checks the provided Bearer token against the main API key and all sub keys.
+    Accepts either:
+    - ``Authorization: Bearer <key>`` (OpenAI SDK style)
+    - ``x-api-key: <key>`` (Anthropic SDK style)
     """
     from .admin.auth import verify_any_api_key
 
@@ -263,8 +267,14 @@ async def verify_api_key(
     ):
         return True
 
-    # Check if credentials provided
-    if credentials is None:
+    # Resolve token: prefer Bearer, fall back to x-api-key header
+    token: str | None = None
+    if credentials is not None:
+        token = credentials.credentials
+    elif x_api_key is not None:
+        token = x_api_key
+
+    if token is None:
         raise HTTPException(status_code=401, detail="API key required")
 
     # Check main key and sub keys
@@ -273,10 +283,8 @@ async def verify_api_key(
         if _server_state.global_settings is not None
         else []
     )
-    if not verify_any_api_key(
-        credentials.credentials, _server_state.api_key, sub_keys
-    ):
-        logger.warning("Rejected API key: %r", credentials.credentials)
+    if not verify_any_api_key(token, _server_state.api_key, sub_keys):
+        logger.warning("Rejected API key: %r", token)
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     return True
