@@ -9,6 +9,35 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _patch_transformers_generic() -> None:
+    """Add compatibility stubs for transformers.utils.generic symbols that may
+    be missing in older installed versions but required by newer model files."""
+    import contextlib
+    import importlib
+
+    try:
+        mod = importlib.import_module("transformers.utils.generic")
+    except ImportError:
+        return
+
+    if not hasattr(mod, "check_model_inputs"):
+        # check_model_inputs validates forward() kwargs; treat as no-op.
+        def check_model_inputs(*args, **kwargs):  # noqa: ANN001
+            pass
+
+        mod.check_model_inputs = check_model_inputs
+        logger.debug("Injected stub: transformers.utils.generic.check_model_inputs")
+
+    if not hasattr(mod, "maybe_autocast"):
+        # maybe_autocast returns a context manager for dtype casting; no-op here.
+        @contextlib.contextmanager
+        def maybe_autocast(*args, **kwargs):  # noqa: ANN001
+            yield
+
+        mod.maybe_autocast = maybe_autocast
+        logger.debug("Injected stub: transformers.utils.generic.maybe_autocast")
+
+
 def load_text_model(
     model_name: str,
     tokenizer_config: dict[str, Any] | None = None,
@@ -24,6 +53,7 @@ def load_text_model(
             - "8bit": 8-bit INT8 quantization via bitsandbytes (CUDA only).
             - None: Full precision (float16 on CUDA, float32 on CPU).
     """
+    _patch_transformers_generic()
     from transformers import AutoModelForCausalLM, AutoTokenizer
     import torch
 
